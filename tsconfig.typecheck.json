@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "paths": {
+      "@context-hierarchy/core": ["./packages/core/src/index.ts"]
+    }
+  },
+  "include": ["packages/core/src", "packages/proxy/src"]
+}

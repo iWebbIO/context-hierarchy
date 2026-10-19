@@ -1,7 +1,13 @@
 {
   "name": "@context-hierarchy/proxy",
   "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/main.js",
+    "build": "tsc -p ."
+  },
   "dependencies": {
-    "@context-hierarchy/core": "*"
+    "@context-hierarchy/core": "*",
+    "fastify": "^5.12.7"
   }
 }

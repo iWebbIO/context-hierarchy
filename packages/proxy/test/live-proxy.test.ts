@@ -1,0 +1,90 @@
+// Live proxy smoke test — runs ONLY under LIVE=1 (and .env having the
+// UPSTREAM_* values). Under plain `npm test` this file's single test is
+// skipped, so the suite never touches the network.
+//
+// It boots the REAL proxy (startProxy, ephemeral port) and makes one small
+// real chat-completions request via plain fetch against the local URL. The
+// upstream API key from .env is used only to reach the upstream; it is never
+// logged, asserted on, or written anywhere.
+
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadConfig, startProxy } from "../src/index.js";
+
+function parseEnv(path: string): Record<string, string> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return {}; // missing .env → skip honestly below
+  }
+  const out: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+// packages/proxy/test → repo root (where .env lives).
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const env = parseEnv(join(repoRoot, ".env"));
+
+const enabled =
+  process.env.LIVE === "1" &&
+  Boolean(env.UPSTREAM_BASE_URL && env.UPSTREAM_API_KEY && env.UPSTREAM_MODEL);
+
+let server: { url: string; close(): Promise<void> } | undefined;
+let tempDir: string | undefined;
+
+afterEach(async () => {
+  if (server) await server.close();
+  server = undefined;
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  tempDir = undefined;
+});
+
+describe("live proxy smoke (runs only under LIVE=1)", () => {
+  it.skipIf(!enabled)(
+    "startProxy serves one small real chat completion (200 + assistant content)",
+    async () => {
+      tempDir = mkdtempSync(join(tmpdir(), "ctxh-live-proxy-"));
+      const cfg = loadConfig({
+        port: 0, // ephemeral
+        dataDir: tempDir,
+      });
+      server = await startProxy(cfg);
+      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+
+      const res = await fetch(`${server.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "any-model-name",
+          messages: [{ role: "user", content: "Reply with the single word: pong" }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        choices: Array<{ message: { role: string; content: string } }>;
+      };
+      expect(body.choices[0].message.role).toBe("assistant");
+      expect(body.choices[0].message.content.length).toBeGreaterThan(0);
+    },
+    120_000,
+  );
+});

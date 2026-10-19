@@ -4,5 +4,8 @@
   "main": "dist/index.js",
   "dependencies": {
     "js-tiktoken": "^1.0.21"
+  },
+  "scripts": {
+    "build": "tsc -p ."
   }
 }

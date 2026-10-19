@@ -10,7 +10,9 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/proxy"
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "build": "npm run build --workspaces",
+    "start": "npm run build && node packages/proxy/dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
