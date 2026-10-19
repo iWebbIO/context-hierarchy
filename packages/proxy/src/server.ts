@@ -200,10 +200,18 @@ function parseMessages(raw: unknown): ChatMessage[] {
         `message.role must be one of ${roles.join("|")} (got ${JSON.stringify(m.role)}).`,
       );
     }
-    if (typeof m.content !== "string") {
-      throw new InvalidRequestError("message.content must be a string.");
+    // OpenAI wire convention: an assistant tool-call message carries
+    // `content: null` (and clients echo it back in conversation history).
+    // Core's v1 ChatMessage is string-content, so null is coerced to "" HERE
+    // — a standard tool-calling round-trip must survive its second turn.
+    // Anything else non-string (numbers, objects, missing field) is malformed.
+    if (m.content !== null && typeof m.content !== "string") {
+      throw new InvalidRequestError("message.content must be a string or null.");
     }
-    const message: ChatMessage = { role: m.role as Role, content: m.content };
+    const message: ChatMessage = {
+      role: m.role as Role,
+      content: m.content ?? "",
+    };
     if (m.tool_calls !== undefined) {
       if (!Array.isArray(m.tool_calls)) {
         throw new InvalidRequestError("message.tool_calls must be an array.");

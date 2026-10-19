@@ -475,6 +475,60 @@ describe("POST /v1/chat/completions — non-stream", () => {
     expect(call.temperature).toBe(0.2);
     expect(call.max_tokens).toBe(100);
   });
+
+  it("a tool-calling second turn (assistant content: null + tool_calls echoed back) is accepted", async () => {
+    // The OpenAI wire convention: an assistant tool-call message carries
+    // `content: null`, and clients echo it back in the history for turn 2.
+    // The proxy coerces null → "" locally; the round-trip must not 400.
+    const h = makeHarness({
+      onChat: () => ({ content: "the weather is sunny", finishReason: "stop" }),
+    });
+    const history = [
+      { role: "user", content: "weather in Berlin?" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: "{\"city\":\"Berlin\"}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "{\"temp\": 21}" },
+    ];
+
+    const res = await chat(h.app, { messages: history });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().choices[0].message.content).toBe("the weather is sunny");
+    // The dispatched history: content coerced to "", tool_calls and the tool
+    // message intact (the null never reaches core's string-typed ChatMessage).
+    expect(h.adapter.calls.length).toBe(1);
+    const sent = h.adapter.calls[0].messages;
+    expect(sent[1]).toEqual({
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "get_weather", arguments: "{\"city\":\"Berlin\"}" },
+        },
+      ],
+    });
+    expect(sent[2]).toEqual({ role: "tool", tool_call_id: "call_1", content: "{\"temp\": 21}" });
+  });
+
+  it("content that is neither a string nor null is still rejected", async () => {
+    const h = makeHarness({ onChat: () => ({ content: "x", finishReason: "stop" }) });
+
+    const numeric = await chat(h.app, { messages: [{ role: "user", content: 42 }] });
+    expect(numeric.statusCode).toBe(400);
+    expect(numeric.json().error.type).toBe("invalid_request_error");
+    expect(h.adapter.calls.length).toBe(0);
+  });
 });
 
 describe("POST /v1/chat/completions — stream", () => {
