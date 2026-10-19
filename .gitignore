@@ -6,3 +6,4 @@ dist/
 .zcode/
 coverage/
 *.log
+benchmark-results/

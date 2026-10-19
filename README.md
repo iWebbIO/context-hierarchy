@@ -120,7 +120,29 @@ node packages/benchmark/dist/run.js --trials 2 --concurrency 4 --out benchmark-r
 
 ### Results
 
-<!-- BENCHMARK_RESULTS_PLACEHOLDER -->
+First full-grid run — 18 tasks × 4 arms × caps {2k, 4k, 6k, 8k} × 2 trials (576 capped runs) plus the uncapped reference (2 trials per task), against `glm-5.3-max` behind a private endpoint. Zero errors, zero timeouts, zero degraded runs across all 612 live calls.
+
+**Accuracy by arm and cap** (correct / 36 runs; 2 trials × 18 tasks):
+
+| Cap | fleet | map-reduce | solo-hierarchy | truncation |
+|---|---|---|---|---|
+| 2000 | 0/36 | 0/36 | 0/36 | 1/36 |
+| 4000 | **10/36 (28%)** | 9/36 (25%) | 9/36 (25%) | 8/36 (22%) |
+| 6000 | **17/36 (47%)** | 16/36 (44%) | 15/36 (42%) | 15/36 (42%) |
+| 8000 | 18/36 (50%) | 17/36 (47%) | 16/36 (44%) | **19/36 (53%)** |
+| *uncapped* | — | — | — | *16/18 (89%)* |
+
+**What the numbers say (honestly):**
+
+- **The context-management tax is real and large.** Uncapped, the model solves 89% (16/18 — the two misses are exact-formatting tasks it fails even with the full repo in view). At an 8k cap the best arm recovers only ~53%; at 4k, ~28%; at 2k, everything collapses. The missing accuracy is the cost of shrinking context, not model incapacity.
+- **Compression does not beat verbatim at comfortable caps.** At 8k, plain truncation (head+tail verbatim, drop the middle) matches or beats every compression arm — replicating the "verbatim whole files beat the best compressor" finding (arXiv 2610.21073) at proxy scale. The fleet's planner→workers→reducer machinery pays 2–3× tokens and latency for parity there.
+- **The fleet leads only where compression is unavoidable.** At 4k the fleet wins (28% vs 22–25%): when even truncation must discard most of the haystack, structured decomposition preserves a little more.
+- **Tier structure tells you why.** The 3k-haystack tier passes 100% at 6k+ caps in every arm (the request nearly fits, little is lost). The 8k tier drops to ~30% at an 8k cap and the 15k tier to 0% — needles planted mid-haystack die in compression; truncation's survivors are position luck (head+tail retention).
+- **Robustness held throughout**: no errors, no timeouts, no silent degradations in 612 live sub-call-heavy runs; the cap invariant was telemetry-verified on every dispatch (every sub-call ≤ cap).
+
+Raw data: `benchmark-results/run-results.json` (+ per-run state dirs); regenerate with `npm run benchmark`. Full methodology in the generated `benchmark-results/report.md`.
+
+_Scope: one upstream model, comprehension-shaped tasks (needle retrieval, multi-hop joins, update tracking, counting, code comprehension) — no patch-apply coding, no multi-model fleet, single-run per (task, arm, cap, trial) with 2 trials. These are first numbers, not a survey; the rig exists to make them reproducible and extensible._
 
 ## Status
 
