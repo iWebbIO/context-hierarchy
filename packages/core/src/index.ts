@@ -15,3 +15,4 @@ export { ProviderAdapter, UpstreamError } from "./provider-adapter.js";
 export type { AdapterConfig } from "./provider-adapter.js";
 export type { ContextStrategy, FitResult, SpilledMessage, StrategyCtx } from "./strategy.js";
 export { TruncationStrategy } from "./strategies/truncation.js";
+export { HierarchyStrategy, SpillRestoreError } from "./strategies/hierarchy.js";
