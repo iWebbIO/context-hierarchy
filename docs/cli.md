@@ -17,7 +17,7 @@ npm run build
 node packages/cli/dist/run.js help
 ```
 
-Post-publish placeholder (once the human publishes):
+Once the package is published to npm:
 
 ```sh
 npm i -g context-hierarchy
@@ -35,10 +35,12 @@ Every command reads the same configuration, from the environment and a
 | `UPSTREAM_BASE_URL` | OpenAI-compatible base URL (version segment included) | required |
 | `UPSTREAM_API_KEY` | key forwarded to the upstream — never printed or logged | required |
 | `UPSTREAM_MODEL` | model every call is routed to | required |
-| `CAP_TOKENS` | hard per-model-call token cap | `6000` |
+| `CAP_TOKENS` | hard per-model-call token cap (prompt side) | `6000` |
 | `STRATEGY` | `hierarchy` (default) or `truncation` | `hierarchy` |
+| `CONCURRENCY` | max concurrent fleet sub-calls per request | `3` |
 | `PORT` | proxy listen port (`0` = ephemeral) | `8787` |
 | `DATA_DIR` | calibration / spill / distillate / telemetry state | `.ctxh` |
+| `PROXY_API_KEY` | when set, clients must present this bearer token to the proxy | (empty) |
 
 ## Commands
 
@@ -74,7 +76,8 @@ single user message, and prints the answer to stdout.
   sub-calls: 3
     1. planner  tokens 512t est / 540+68t actual  latency 812ms
     2. worker  tokens 3180t est / 3301+190t actual  latency 2210ms
-    3. synthesizer  tokens 2890t est / 2931+204t actual  latency 1510ms
+    3. reducer  tokens 2266t est / 2259+140t actual  latency 1490ms
+    4. synthesizer  tokens 2890t est / 2931+204t actual  latency 1510ms
   ```
 
 - A degraded answer (the fleet failed; one truncation-fit capped call
