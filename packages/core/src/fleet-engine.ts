@@ -135,6 +135,9 @@ export interface FleetEngineConfig {
   dataDir: string;
   maxWorkers?: number;
   onSubCall?: (event: SubCallEvent) => void;
+  /** Skip the planner call and slice with fixed map-reduce directly — a
+   * deterministic arm for benchmarking (the proxy never sets this). */
+  plannerDisabled?: boolean;
 }
 
 /**
@@ -313,6 +316,7 @@ export class FleetEngine {
   private readonly model: string;
   private readonly dataDir: string;
   private readonly maxWorkers: number;
+  private readonly plannerDisabled: boolean;
   private readonly onSubCall?: (event: SubCallEvent) => void;
   private readonly cache: DistillateCache;
   private readonly spills: EngineSpillStore;
@@ -326,6 +330,7 @@ export class FleetEngine {
     this.model = cfg.model;
     this.dataDir = cfg.dataDir;
     this.maxWorkers = Math.max(1, Math.floor(cfg.maxWorkers ?? DEFAULT_MAX_WORKERS));
+    this.plannerDisabled = cfg.plannerDisabled ?? false;
     this.onSubCall = cfg.onSubCall;
     this.cache = new DistillateCache(cfg.dataDir);
     this.spills = new EngineSpillStore(cfg.dataDir);
@@ -462,6 +467,7 @@ export class FleetEngine {
     toc: string,
     decomp: Decomposition,
   ): Promise<WorkerSlice[] | undefined> {
+    if (this.plannerDisabled) return undefined; // benchmark arm: straight to map-reduce
     // ONE user message (TOC + the original ask + instruction): some strict
     // upstreams reject consecutive same-role turns, and a single block is
     // easier for a small model to follow.
