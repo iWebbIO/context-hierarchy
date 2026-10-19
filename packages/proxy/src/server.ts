@@ -172,7 +172,14 @@ function deltaChoice(event: Extract<StreamEvent, { type: "delta" }>): Record<str
   if (event.toolCallDeltas !== undefined) {
     delta.tool_calls = event.toolCallDeltas.map((d: ToolCallDelta) => {
       const fragment: Record<string, unknown> = { index: d.index };
-      if (d.id !== undefined) fragment.id = d.id;
+      // Wire convention (and what OpenAI clients aggregate on): the fragment
+      // that opens a tool call carries id + type; later fragments carry only
+      // index + argument deltas. The `type` is required — the official SDK
+      // throws "tool call snapshot missing `type`" without it.
+      if (d.id !== undefined) {
+        fragment.id = d.id;
+        fragment.type = "function";
+      }
       const fn: Record<string, string> = {};
       if (d.functionName !== undefined) fn.name = d.functionName;
       if (d.argumentsDelta !== undefined) fn.arguments = d.argumentsDelta;

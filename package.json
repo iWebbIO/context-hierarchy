@@ -10,12 +10,14 @@
   },
   "scripts": {
     "test": "vitest run",
+    "e2e": "vitest run -c vitest.e2e.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "build": "npm run build --workspaces",
     "start": "npm run build && node packages/proxy/dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "openai": "^7.39.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }

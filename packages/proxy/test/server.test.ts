@@ -651,9 +651,10 @@ describe("POST /v1/chat/completions — stream", () => {
       if (tc !== undefined) toolChunks.push(tc as Array<Record<string, unknown>>);
     }
     expect(toolChunks.length).toBe(3); // one per tool-call delta event
-    // First fragment carries id + name; every fragment has the correct index.
+    // First fragment carries id + type + name (the wire convention the
+    // official SDK's aggregator requires); every fragment has the correct index.
     expect(toolChunks[0]).toEqual([
-      { index: 0, id: "call_1", function: { name: "get_weather", arguments: "" } },
+      { index: 0, id: "call_1", type: "function", function: { name: "get_weather", arguments: "" } },
     ]);
     expect(toolChunks[1]).toEqual([{ index: 0, function: { arguments: "{\"ci" } }]);
     expect(toolChunks[2]).toEqual([{ index: 0, function: { arguments: "ty\":\"Berlin\"}" } }]);
