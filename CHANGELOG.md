@@ -3,17 +3,24 @@
 ## 0.1.0 — M1: core library + capped proxy (unreleased)
 
 - `@context-hierarchy/core` — `TokenAccountant` (js-tiktoken counts × margin,
-  per-model EMA calibration from upstream usage, persisted), `ProviderAdapter`
+  per-model EMA calibration from upstream usage, persisted — folded in by the
+  engine on every dispatch that reports usage), `ProviderAdapter`
   (faithful OpenAI wire format, SSE streaming with `:`-comment filtering and
-  `[DONE]`, tool_calls delta aggregation, retries with backoff).
+  `[DONE]`, tool_calls delta aggregation, retries with backoff, mid-stream
+  `error` surfaced in BOTH forms — per-choice and top-level (OpenRouter's
+  choices-less chunk shape)).
 - Strategies — `TruncationStrategy` (property-tested baseline) and
   `HierarchyStrategy` (rule-based elision first, then one capped condense call;
   head+tail verbatim; spill/restore by pointer; system-overflow middle-cut
   final resort).
-- `DistillateCache` (content-addressed, append-only) + `FleetEngine` — TOC →
-  planner → budgeted workers → synthesizer; hard-cap invariant on every
-  outgoing call; identical-request replay with zero model calls; graceful
-  degradation to a truncation-fitted direct call, marked degraded.
+- `DistillateCache` (content-addressed, append-only, best-effort writes) +
+  `EngineSpillStore` (durable, hash-verified spill records for every
+  engine-initiated strategy fit — worker slices, synthesizer, degraded fits —
+  restorable by pointer) + `FleetEngine` — TOC → planner → budgeted workers →
+  synthesizer; hard-cap invariant on every outgoing call; identical-request
+  replay with zero model calls; graceful degradation to a truncation-fitted
+  direct call, marked degraded (ChatResult flag + sub-call telemetry event on
+  non-stream; degraded finish event + SSE comment marker on stream).
 - `@context-hierarchy/proxy` — Fastify server: `POST /v1/chat/completions`
   (non-stream + SSE stream, synthetic usage summed across sub-calls,
   `x-context-hierarchy-degraded` header, `content: null` tool-call round-trips),

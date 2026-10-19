@@ -287,6 +287,65 @@ describe("ProviderAdapter.stream", () => {
     ]);
     expect(calls.length).toBe(1); // mid-stream failures are never retried
   });
+
+  it("surfaces a TOP-LEVEL chunk error (choices-less, OpenRouter mid-stream failure form)", async () => {
+    // OpenRouter's actual mid-stream failure shape: an error object at the
+    // top level of the chunk, no choices array at all. Without the top-level
+    // check the chunk would fall through the choices `continue` and the
+    // stream would END CLEANLY — the failure indistinguishable from a normal
+    // end (the final-review honesty finding this pins).
+    const { adapter, calls } = adapterFor([
+      {
+        kind: "response",
+        response: sseBody([
+          sse({ choices: [{ delta: { content: "par" } }] }),
+          sse({ choices: [{ delta: { content: "tial" } }] }),
+          sse({ error: { message: "Provider stream error: rate limited", code: 429 } }),
+          DONE,
+        ]),
+      },
+    ]);
+    const events = await collect(adapter.stream(params));
+
+    expect(events).toStrictEqual([
+      { type: "delta", content: "par" },
+      { type: "delta", content: "tial" },
+      { type: "error", message: "Provider stream error: rate limited" },
+    ]);
+    expect(calls.length).toBe(1);
+  });
+
+  it("a top-level string error also surfaces (not just object forms)", async () => {
+    const { adapter } = adapterFor([
+      {
+        kind: "response",
+        response: sseBody([sse({ error: "gateway exploded" }), DONE]),
+      },
+    ]);
+    const events = await collect(adapter.stream(params));
+    expect(events).toStrictEqual([{ type: "error", message: "gateway exploded" }]);
+  });
+
+  it("an error-less choices-less chunk (bare usage) still ends cleanly with usage attached", async () => {
+    // Regression guard for the top-level-error branch: a choices-less chunk
+    // that carries NO error (the usage-only chunk) must keep its old behavior.
+    const { adapter } = adapterFor([
+      {
+        kind: "response",
+        response: sseBody([
+          sse({ choices: [{ delta: { content: "hi" } }] }),
+          sse({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+          sse({ choices: [], usage: { prompt_tokens: 4, completion_tokens: 1 } }),
+          DONE,
+        ]),
+      },
+    ]);
+    const events = await collect(adapter.stream(params));
+    expect(events).toStrictEqual([
+      { type: "delta", content: "hi" },
+      { type: "finish", finishReason: "stop", usage: { promptTokens: 4, completionTokens: 1 } },
+    ]);
+  });
 });
 
 // ─── retry policy ───────────────────────────────────────────────────────────

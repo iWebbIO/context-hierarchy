@@ -31,8 +31,24 @@
 // (the mathematically unsatisfiable input class). stream() degrades the
 // same way but only BEFORE the first event was yielded — after that a
 // second stream would duplicate output, so the error surfaces honestly
-// instead. A degraded stream cannot be marked: StreamEvent has no degraded
-// field (the flag lives on ChatResult by the interface contract).
+// instead. A degraded stream IS marked: the degraded dispatch's finish
+// event carries `degraded: true` (a stream that ends without a finish gets
+// a synthetic degraded finish), the sub-call telemetry event carries the
+// same flag, and the proxy additionally emits an SSE comment marker —
+// headers are already sent by then, so the header cannot be set.
+//
+// Reversibility (global constraint 6, engine side): every strategy fit the
+// dispatch funnel performs (worker slices, synthesizer, degraded fits) is
+// recorded through the EngineSpillStore — whatever the fit removed lands in
+// a durable spill record restorable by pointer, whatever the configured
+// strategy itself persists. A spill record is a guarantee, not an
+// accelerator: a failure to WRITE it propagates like any fit failure (the
+// request degrades), rather than silently discarding messages.
+//
+// Calibration (global constraint 8): every dispatch with reported upstream
+// usage folds its actual/estimated prompt-token ratio into the accountant's
+// per-model EMA (`observeUsage`), so persisted factors track the real model
+// instead of staying 1.0 forever.
 //
 // Documented quirk: a cache-hit replay's `onSubCall` event carries
 // `cacheHit: true` and the FULL request estimate — which is over the cap by
@@ -41,8 +57,9 @@
 
 import { DistillateCache } from "./distillate-cache.js";
 import type { DistillateFinal } from "./distillate-cache.js";
+import { EngineSpillStore } from "./engine-spill-store.js";
 import type { ProviderAdapter } from "./provider-adapter.js";
-import type { ContextStrategy, StrategyCtx } from "./strategy.js";
+import type { ContextStrategy, FitResult, StrategyCtx } from "./strategy.js";
 import { TruncationStrategy } from "./strategies/truncation.js";
 import type { TokenAccountant } from "./token-accountant.js";
 import { countTokens } from "./token-count.js";
@@ -82,6 +99,13 @@ export interface SubCallEvent {
   completionTokens?: number;
   latencyMs: number;
   cacheHit: boolean;
+  /**
+   * Set when this call was the degraded fallback (a fleet failure answered by
+   * one truncation-fit direct call) — global constraint 10's "marked
+   * degraded", on the telemetry path where the proxy's stream responses
+   * cannot carry the HTTP header.
+   */
+  degraded?: boolean;
 }
 
 /** Constructor config (plan contract, task 5). */
@@ -247,6 +271,7 @@ export class FleetEngine {
   private readonly maxWorkers: number;
   private readonly onSubCall?: (event: SubCallEvent) => void;
   private readonly cache: DistillateCache;
+  private readonly spills: EngineSpillStore;
   private readonly strategyCtx: StrategyCtx;
 
   constructor(cfg: FleetEngineConfig) {
@@ -259,6 +284,7 @@ export class FleetEngine {
     this.maxWorkers = Math.max(1, Math.floor(cfg.maxWorkers ?? DEFAULT_MAX_WORKERS));
     this.onSubCall = cfg.onSubCall;
     this.cache = new DistillateCache(cfg.dataDir);
+    this.spills = new EngineSpillStore(cfg.dataDir);
     this.strategyCtx = {
       adapter: cfg.adapter,
       accountant: cfg.accountant,
@@ -271,8 +297,18 @@ export class FleetEngine {
   // The dispatch funnel — every outgoing adapter call passes through here.
   // ------------------------------------------------------------------
 
-  /** Estimate, strategy-fit over-cap messages, verify, and never dispatch over cap. */
-  private async fitForCap(params: ChatParams): Promise<{ messages: ChatMessage[]; estimatedTokens: number }> {
+  /**
+   * Estimate, strategy-fit over-cap messages, verify, and never dispatch over
+   * cap. Whatever the fit removed is recorded durably through the
+   * EngineSpillStore (global constraint 6, engine side) — including under a
+   * diskless strategy, whose own spill record would otherwise not exist. A
+   * record-write failure propagates: a fit whose removals cannot be recorded
+   * is a failed fit, never a silent discard (the caller degrades).
+   */
+  private async fitForCap(
+    params: ChatParams,
+    call: SubCallEvent["call"],
+  ): Promise<{ messages: ChatMessage[]; estimatedTokens: number }> {
     let messages = params.messages;
     let estimatedTokens = this.accountant.estimate(messages, this.model);
     if (estimatedTokens > this.capTokens) {
@@ -287,16 +323,24 @@ export class FleetEngine {
           `post-fit estimate ${estimatedTokens} exceeds cap ${this.capTokens} (strategy: ${this.strategy.name})`,
         );
       }
+      // The fit's output is what will be dispatched — its removals are now
+      // landable in a durable record.
+      await this.spills.record(call, params.messages, fit.spill);
     }
     return { messages, estimatedTokens };
   }
 
   /** One non-streaming model call through the funnel. */
-  private async dispatch(params: ChatParams, call: SubCallEvent["call"]): Promise<ChatResult> {
+  private async dispatch(
+    params: ChatParams,
+    call: SubCallEvent["call"],
+    degraded = false,
+  ): Promise<ChatResult> {
     const started = Date.now();
-    const fitted = await this.fitForCap(params);
+    const fitted = await this.fitForCap(params, call);
     const result = await this.adapter.chat({ ...params, messages: fitted.messages });
-    this.emitSubCall(call, fitted.estimatedTokens, Date.now() - started, false, result.usage);
+    this.observeUsage(fitted.estimatedTokens, result.usage);
+    this.emitSubCall(call, fitted.estimatedTokens, Date.now() - started, false, result.usage, degraded);
     return result;
   }
 
@@ -304,15 +348,28 @@ export class FleetEngine {
   private async *dispatchStream(
     params: ChatParams,
     call: SubCallEvent["call"],
+    degraded = false,
   ): AsyncGenerator<StreamEvent> {
     const started = Date.now();
-    const fitted = await this.fitForCap(params);
+    const fitted = await this.fitForCap(params, call);
     let usage: Usage | undefined;
     for await (const event of this.adapter.stream({ ...params, messages: fitted.messages })) {
       if (event.type === "finish" && event.usage !== undefined) usage = event.usage;
       yield event;
     }
-    this.emitSubCall(call, fitted.estimatedTokens, Date.now() - started, false, usage);
+    this.observeUsage(fitted.estimatedTokens, usage);
+    this.emitSubCall(call, fitted.estimatedTokens, Date.now() - started, false, usage, degraded);
+  }
+
+  /**
+   * Fold one dispatch's actual prompt tokens into the per-model EMA factor
+   * (global constraint 8's calibration loop). The estimate is what the funnel
+   * computed for the messages actually sent; nothing is observed when the
+   * upstream reported no usage.
+   */
+  private observeUsage(estimatedTokens: number, usage: Usage | undefined): void {
+    if (usage === undefined) return;
+    this.accountant.observeUsage(this.model, estimatedTokens, usage.promptTokens);
   }
 
   private emitSubCall(
@@ -321,6 +378,7 @@ export class FleetEngine {
     latencyMs: number,
     cacheHit: boolean,
     usage?: Usage,
+    degraded = false,
   ): void {
     if (!this.onSubCall) return;
     const event: SubCallEvent = { call, estimatedTokens, latencyMs, cacheHit };
@@ -328,6 +386,7 @@ export class FleetEngine {
       event.promptTokens = usage.promptTokens;
       event.completionTokens = usage.completionTokens;
     }
+    if (degraded) event.degraded = true;
     this.onSubCall(event);
   }
 
@@ -472,30 +531,33 @@ export class FleetEngine {
   // ------------------------------------------------------------------
 
   /**
-   * Strategy-fit the ORIGINAL request for the degraded single direct call.
-   * A configured strategy that throws falls back to a bare TruncationStrategy
-   * (the always-works baseline).
+   * Strategy-fit the ORIGINAL request for the degraded single direct call,
+   * recording the fit's removals like any funnel fit. A configured strategy
+   * that throws (including a throwing spill-record write) falls back to a
+   * bare TruncationStrategy (the always-works baseline).
    */
-  private async fitForDegradation(messages: ChatMessage[]): Promise<ChatMessage[]> {
+  private async fitForDegradation(params: ChatParams): Promise<ChatMessage[]> {
     try {
       const fit = await this.strategy.fit(
-        { messages, budgetTokens: this.capTokens },
+        { messages: params.messages, budgetTokens: this.capTokens },
         this.strategyCtx,
       );
+      await this.spills.record("direct", params.messages, fit.spill);
       return fit.messages;
     } catch {
       const fit = await new TruncationStrategy().fit(
-        { messages, budgetTokens: this.capTokens },
+        { messages: params.messages, budgetTokens: this.capTokens },
         this.strategyCtx,
       );
+      await this.spills.record("direct", params.messages, fit.spill);
       return fit.messages;
     }
   }
 
   /** The degraded path: one truncation-fit direct call, marked degraded. */
   private async degradedRun(params: ChatParams): Promise<ChatResult> {
-    const messages = await this.fitForDegradation(params.messages);
-    const result = await this.dispatch({ ...params, messages }, "direct");
+    const messages = await this.fitForDegradation(params);
+    const result = await this.dispatch({ ...params, messages }, "direct", true);
     return { ...result, degraded: true };
   }
 
@@ -585,10 +647,25 @@ export class FleetEngine {
       }
     } catch (e) {
       if (deliveredAny) throw e; // degrading now would duplicate already-yielded output
-      // Nothing was yielded yet — degrade to one direct stream. The degraded
-      // stream cannot be marked: StreamEvent carries no degraded field.
-      const messages = await this.fitForDegradation(params.messages);
-      yield* this.dispatchStream({ ...params, messages }, "direct");
+      // Nothing was yielded yet — degrade to one direct stream, marked: the
+      // finish event carries `degraded: true` (synthesized if the underlying
+      // stream ends without one) and the sub-call telemetry event does too.
+      const messages = await this.fitForDegradation(params);
+      let sawFinish = false;
+      for await (const event of this.dispatchStream({ ...params, messages }, "direct", true)) {
+        if (event.type === "finish") {
+          sawFinish = true;
+          yield { ...event, degraded: true };
+        } else {
+          yield event;
+        }
+      }
+      if (!sawFinish) {
+        // The degraded stream ended without a finish (the upstream cut the
+        // connection): synthesize one so the degraded marker is never
+        // silently lost. An empty finishReason maps to `null` on the wire.
+        yield { type: "finish", finishReason: "", degraded: true };
+      }
     }
   }
 }

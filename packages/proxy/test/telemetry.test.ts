@@ -76,6 +76,27 @@ describe("Telemetry", () => {
     expect(entries[1].cacheHit).toBe(true);
   });
 
+  it("logSubCall records the degraded flag (constraint 10's telemetry marking)", () => {
+    const dir = tempDir("ctxh-telemetry-test-");
+    const telemetry = new Telemetry(join(dir, "telemetry.jsonl"));
+
+    telemetry.logSubCall({
+      call: "direct",
+      estimatedTokens: 540,
+      promptTokens: 500,
+      completionTokens: 40,
+      latencyMs: 30,
+      cacheHit: false,
+      degraded: true,
+    });
+
+    const entries = telemetry.entries() as Array<Record<string, unknown>>;
+    expect(entries.length).toBe(1);
+    expect(entries[0].degraded).toBe(true); // the marker survives the JSONL round trip
+    // Absent, not false, on non-degraded events (already pinned above: the
+    // non-flagged events in the previous test carry no `degraded` key).
+  });
+
   it("writes real files (append-only, one JSON object per line)", () => {
     const dir = tempDir("ctxh-telemetry-test-");
     const telemetry = new Telemetry(join(dir, "telemetry.jsonl"));

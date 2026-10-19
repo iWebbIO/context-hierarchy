@@ -11,7 +11,9 @@
 //    carrying `usage` — whatever its `choices` shape: OpenAI sends an empty
 //    array, OpenRouter a non-empty one — attaches that usage to the finish
 //    event, so the finish reason is held back until [DONE]/stream end.
-//    Per-choice `error` objects surface as `error` events and end the stream.
+//    `error` objects surface as `error` events and end the stream: BOTH the
+//    per-choice form and the TOP-LEVEL form (OpenRouter's actual mid-stream
+//    failure shape, which carries no `choices` array at all).
 //  - models(): GET {baseUrl}/models, parsed-JSON passthrough.
 //
 // Retries: 5xx and network/timeout failures only, never 4xx. chat() retries
@@ -316,13 +318,22 @@ export class ProviderAdapter {
         continue; // tolerate a malformed data line rather than kill the stream
       }
       if (typeof chunk !== "object" || chunk === null) continue;
-      const record = chunk as { usage?: unknown; choices?: unknown };
+      const record = chunk as { error?: unknown; usage?: unknown; choices?: unknown };
 
       // Usage may ride on its own chunk (either `choices` shape) or on the
       // finish chunk — key off `usage` being present, never the choices shape.
       if (record.usage !== undefined) {
         const usage = mapUsage(record.usage);
         if (usage !== undefined) pendingUsage = usage;
+      }
+
+      // A TOP-LEVEL `error` object (OpenRouter's mid-stream failure form)
+      // carries no `choices` array at all — without this check it would fall
+      // through the `continue` below and the failure would masquerade as a
+      // clean stream end. Surface it and stop, exactly like a choice error.
+      if (record.error !== undefined && record.error !== null) {
+        yield { type: "error", message: errorMessage(record.error) };
+        return;
       }
 
       if (!Array.isArray(record.choices)) continue;

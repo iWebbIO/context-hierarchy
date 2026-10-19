@@ -15,5 +15,5 @@ Canonical terms for this project. Keep code, docs, and discussion aligned on the
 - **Planner** — the capped sub-call that reads the TOC and assigns worker slices with explicit per-worker token budgets.
 - **Worker** — a capped sub-call that turns its assigned verbatim slice into a bounded digest.
 - **Synthesizer** — the capped sub-call that merges worker digests with the head, tail, and the original ask, and streams the final answer.
-- **Degraded call** — the fallback: when the fleet fails for any reason, the request is truncation-fit into a single capped call and answered, marked degraded in telemetry.
+- **Degraded call** — the fallback: when the fleet fails for any reason, the request is truncation-fit into a single capped call and answered, marked degraded (the `x-context-hierarchy-degraded` response header on non-stream, an SSE comment marker on stream, and the degraded flag on the sub-call telemetry event).
 - **Upstream** — the real OpenAI-compatible API behind the proxy (dev/E2E: apix.moreweb.space; deployment targets: Ollama, OpenRouter, any OpenAI-compatible endpoint).

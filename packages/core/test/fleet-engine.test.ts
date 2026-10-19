@@ -10,7 +10,7 @@
 //   synthesizer  — contains a "[digest 1]" wrap
 //   direct       — everything else (passthrough, degraded)
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -65,8 +65,8 @@ class FakeAdapter {
   readonly calls: ChatParams[] = [];
 
   constructor(
-    private readonly onChat: (params: ChatParams) => ChatResult | Promise<ChatResult>,
-    private readonly onStream: (params: ChatParams) => StreamEvent[],
+    protected readonly onChat: (params: ChatParams) => ChatResult | Promise<ChatResult>,
+    protected readonly onStream: (params: ChatParams) => StreamEvent[],
   ) {}
 
   async chat(params: ChatParams): Promise<ChatResult> {
@@ -483,13 +483,14 @@ describe("FleetEngine.run", () => {
     expect(accountant.estimate(direct.messages, MODEL)).toBeLessThanOrEqual(cap);
     expect(direct.messages).not.toEqual(messages);
 
-    // Only the completed direct call emitted an event.
+    // Only the completed direct call emitted an event — flagged degraded.
     expect(events).toEqual([
       {
         call: "direct",
         estimatedTokens: expect.any(Number),
         latencyMs: expect.any(Number),
         cacheHit: false,
+        degraded: true,
       },
     ]);
     expect(events[0].estimatedTokens).toBeLessThanOrEqual(cap);
@@ -519,6 +520,132 @@ describe("FleetEngine.run", () => {
     }
     expect(events[3].promptTokens).toBe(80);
     expect(events[3].completionTokens).toBe(12);
+  });
+
+  it("(h-cal) calibration: dispatches with reported usage fold into the accountant's EMA (constraint 8)", async () => {
+    // A usage-bearing fleet run must move the persisted calibration factor
+    // off 1.0: the fake reports promptTokens far below the funnel's estimate
+    // (100 actual vs several hundred estimated), so the factor must fall.
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
+    const messages = conversation(8, 100);
+    const { engine, dataDir, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    expect(accountant.factorFor(MODEL)).toBe(1.0); // precondition: fresh
+
+    await engine.run({ model: MODEL, messages });
+
+    const factorAfter = accountant.factorFor(MODEL);
+    expect(factorAfter).toBeLessThan(1.0); // EMA moved toward actual/estimated < 1
+    expect(factorAfter).toBeGreaterThanOrEqual(0.5); // clamped lower bound
+    // Persisted: a FRESH accountant over the same dataDir reads the same factor.
+    const reloaded = new TokenAccountant({ dataDir });
+    expect(reloaded.factorFor(MODEL)).toBe(factorAfter);
+
+    // The per-dispatch loop also asserts the direction: each usage-bearing
+    // call's own estimate/actual pair feeds the EMA (2 workers + synthesizer).
+    const calibrationPath = join(dataDir, "calibration.json");
+    expect(existsSync(calibrationPath)).toBe(true);
+    expect(JSON.parse(readFileSync(calibrationPath, "utf8"))).toEqual({
+      [MODEL]: factorAfter,
+    });
+  });
+
+  it("(h-cal') a passthrough dispatch with NO reported usage observes nothing (factor stays 1.0)", async () => {
+    const directResult: ChatResult = { content: "answer", finishReason: "stop" }; // no usage
+    const fake = new FakeAdapter(
+      () => directResult,
+      () => [],
+    );
+    const { engine, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+
+    await engine.run({ model: MODEL, messages: conversation(1, 8) });
+
+    expect(accountant.factorFor(MODEL)).toBe(1.0); // nothing to observe
+  });
+
+  it("(spill) every engine-initiated fit lands a durable, restorable spill record (constraint 6)", async () => {
+    // The diskless TruncationStrategy removes messages itself; the engine must
+    // still record them. The worker-funnel fit (test (f)'s one-big-slice
+    // scenario) and the degraded fit both fire here.
+    const oneBigSlice = JSON.stringify([{ start: 1, end: 8, budgetTokens: 500 }]);
+    const fake = new FakeAdapter(fleetScript({ plannerContent: oneBigSlice }), () => []);
+    const messages = conversation(8, 100);
+    const { engine, dataDir, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    await engine.run({ model: MODEL, messages });
+
+    // The worker fit removed middle messages → a record exists, restorable.
+    const spillsDir = join(dataDir, "engine-spills");
+    expect(existsSync(spillsDir)).toBe(true);
+    const { readdirSync } = await import("node:fs");
+    const files = readdirSync(spillsDir);
+    expect(files.length).toBeGreaterThan(0);
+    const { EngineSpillStore } = await import("../src/index.js");
+    const store = new EngineSpillStore(dataDir);
+    const record = await store.restore(files[0]);
+    expect(record.spill.length).toBeGreaterThan(0);
+    // Indices refer to the record's OWN input list (the fit's input)...
+    const originals = new Set(messages.map((m) => JSON.stringify(m)));
+    for (const entry of record.spill) {
+      expect(entry.index).toBeGreaterThanOrEqual(0);
+      expect(entry.index).toBeLessThan(record.input.length);
+      expect(record.input[entry.index]).toEqual(entry.message); // index points at it
+      expect(entry.reason.length).toBeGreaterThan(0);
+      expect(entry.pointer).toMatch(/^[0-9a-f]{64}\.json$/); // restorable
+      // ...and every spilled message is a FULL original from the conversation.
+      expect(originals.has(JSON.stringify(entry.message))).toBe(true);
+    }
+    // The recorded input is the list those indices refer to (here: the
+    // worker's verbatim slice, whose messages are conversation originals).
+    for (const m of record.input) {
+      if (m.content === WORKER_INSTRUCTION) continue;
+      expect(originals.has(JSON.stringify(m))).toBe(true);
+    }
+  });
+
+  it("(spill') a degraded fit also lands a durable spill record", async () => {
+    const fake = new FakeAdapter(
+      (params) => {
+        if (callRole(params) !== "direct") throw new Error("fleet fails (scripted)");
+        return { content: "degraded answer", finishReason: "stop" };
+      },
+      () => {
+        throw new Error("must not stream");
+      },
+    );
+    const messages = conversation(8, 100);
+    const { engine, dataDir, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const result = await engine.run({ model: MODEL, messages });
+    expect(result.degraded).toBe(true);
+
+    const { readdirSync } = await import("node:fs");
+    const files = readdirSync(join(dataDir, "engine-spills"));
+    expect(files.length).toBeGreaterThan(0); // the degraded fit recorded its removals
+  });
+
+  it("(cache-io) a cache-write failure after a successful fleet run never corrupts the outcome", async () => {
+    // The put fails on EVERY write (EACCES via a file-where-the-directory-belongs)
+    // — the fleet result must still come back intact, undegraded, with no
+    // second (degraded) dispatch.
+    const { writeFileSync, mkdirSync: mkdirSyncSync } = await import("node:fs");
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
+    const messages = conversation(8, 100);
+    const harness = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(harness.accountant, messages);
+    // Break the cache directory: a file sits where ${dataDir}/cache must be.
+    writeFileSync(join(harness.dataDir, "cache"), "not a directory", "utf8");
+    // The engine-spills dir must still work (it is a different subtree).
+    mkdirSyncSync(join(harness.dataDir, "engine-spills"), { recursive: true });
+
+    const result = await harness.engine.run({ model: MODEL, messages });
+
+    expect(result.content).toBe("synthesized fleet answer");
+    expect(result.degraded).toBeUndefined(); // success was NOT turned into degradation
+    expect(rolesOf(fake)).toEqual(["planner", "worker", "worker", "synthesizer"]); // no re-dispatch
   });
 });
 
@@ -620,5 +747,147 @@ describe("FleetEngine.stream", () => {
         cacheHit: false,
       },
     ]);
+  });
+
+  it("(g-stream) stream degradation before the first yield: events marked degraded, telemetry flagged", async () => {
+    // The fleet fails before anything was yielded → the stream degrades to one
+    // direct stream (constraint 10), and the degradation is MARKED: the finish
+    // event carries `degraded: true` and the sub-call event is flagged.
+    const degradedStream: StreamEvent[] = [
+      { type: "delta", content: "degraded " },
+      { type: "delta", content: "stream answer" },
+      { type: "finish", finishReason: "stop", usage: { promptTokens: 7, completionTokens: 3 } },
+    ];
+    const fake = new FakeAdapter(
+      (params) => {
+        if (callRole(params) !== "direct") throw new Error("fleet fails before first yield (scripted)");
+        return { content: "unused", finishReason: "stop" };
+      },
+      (params) => {
+        if (callRole(params) === "direct") return degradedStream;
+        throw new Error("fleet stream fails (scripted)");
+      },
+    );
+    const messages = conversation(8, 100);
+    const { engine, events, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const collected: StreamEvent[] = [];
+    for await (const event of engine.stream({ model: MODEL, messages })) collected.push(event);
+
+    // The deltas pass through; the finish event is marked degraded.
+    const finish = collected[collected.length - 1];
+    expect(finish).toEqual({
+      type: "finish",
+      finishReason: "stop",
+      usage: { promptTokens: 7, completionTokens: 3 },
+      degraded: true,
+    });
+    expect(collected[0]).toEqual({ type: "delta", content: "degraded " });
+
+    // The degraded direct stream made exactly one dispatch, under the cap.
+    const directCalls = fake.calls.filter((c) => callRole(c) === "direct");
+    expect(directCalls.length).toBe(1);
+    expect(accountant.estimate(directCalls[0].messages, MODEL)).toBeLessThanOrEqual(CAP);
+
+    // The sub-call telemetry event carries the degraded flag (constraint 10).
+    const degradedEvents = events.filter((e) => e.degraded === true);
+    expect(degradedEvents.length).toBe(1);
+    expect(degradedEvents[0].call).toBe("direct");
+    expect(degradedEvents[0].promptTokens).toBe(7);
+  });
+
+  it("(g-stream') a degraded stream that ends without a finish gets a synthesized degraded finish", async () => {
+    // The upstream cut the connection (no finish event) — the degraded marker
+    // must not be silently lost; a synthetic degraded finish is appended.
+    const fake = new FakeAdapter(
+      (params) => {
+        if (callRole(params) !== "direct") throw new Error("fleet fails (scripted)");
+        return { content: "unused", finishReason: "stop" };
+      },
+      (params) => {
+        if (callRole(params) === "direct") return [{ type: "delta", content: "partial" }];
+        throw new Error("fleet stream fails (scripted)");
+      },
+    );
+    const messages = conversation(8, 100);
+    const { engine, events, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const collected: StreamEvent[] = [];
+    for await (const event of engine.stream({ model: MODEL, messages })) collected.push(event);
+
+    expect(collected).toEqual([
+      { type: "delta", content: "partial" },
+      { type: "finish", finishReason: "", degraded: true },
+    ]);
+    expect(events.filter((e) => e.degraded === true).length).toBe(1);
+  });
+
+  it("(g-stream'') a mid-stream failure AFTER events were yielded surfaces honestly, never a duplicated degrade", async () => {
+    // The synthesizer yields a delta, THEN fails — degrading now would
+    // duplicate output, so the error surfaces instead (pinned behavior).
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => {
+      throw new Error("must not stream the fleet path");
+    });
+    const failingStream = async function* (): AsyncGenerator<StreamEvent> {
+      yield { type: "delta", content: "partial " };
+      throw new Error("synthesizer died mid-stream (scripted)");
+    };
+    // Wire the failing synthesizer stream through a subclassed fake.
+    class MidStreamFake extends FakeAdapter {
+      async *stream(params: ChatParams): AsyncGenerator<StreamEvent> {
+        this.calls.push(params);
+        if (callRole(params) === "synthesizer") {
+          yield* failingStream();
+          return;
+        }
+        for (const event of this.onStream(params)) yield event;
+      }
+    }
+    const mid = new MidStreamFake(
+      fleetScript({ plannerContent: HAPPY_PLAN }),
+      () => [],
+    );
+    void fake;
+    const messages = conversation(8, 100);
+    const { engine, accountant } = makeHarness({ adapter: mid, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const collected: StreamEvent[] = [];
+    await expect(async () => {
+      for await (const event of engine.stream({ model: MODEL, messages })) collected.push(event);
+    }).rejects.toThrow("synthesizer died mid-stream (scripted)");
+    expect(collected).toEqual([{ type: "delta", content: "partial " }]); // no duplicated output
+  });
+
+  it("(cache-io') a cache-write failure after a streamed fleet answer never turns success into an error", async () => {
+    const streamContent = text(60);
+    const synthStream: StreamEvent[] = [
+      { type: "delta", content: streamContent },
+      { type: "finish", finishReason: "stop", usage: { promptTokens: 42, completionTokens: 60 } },
+    ];
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => synthStream);
+    const messages = conversation(8, 100);
+    const harness = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(harness.accountant, messages);
+    // Break the cache directory so the post-stream put fails.
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(harness.dataDir, "cache"), "not a directory", "utf8");
+
+    const collected: StreamEvent[] = [];
+    for await (const event of harness.engine.stream({ model: MODEL, messages })) {
+      collected.push(event);
+    }
+
+    // The full answer was delivered; the finish survived; no error surfaced.
+    const deltas = collected.filter((e) => e.type === "delta") as { content?: string }[];
+    expect(deltas.map((d) => d.content ?? "").join("")).toBe(streamContent);
+    expect(collected[collected.length - 1]).toEqual({
+      type: "finish",
+      finishReason: "stop",
+      usage: { promptTokens: 42, completionTokens: 60 },
+    });
+    expect(collected.filter((e) => e.type === "error")).toEqual([]);
   });
 });

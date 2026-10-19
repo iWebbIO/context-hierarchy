@@ -722,6 +722,71 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(res.body).toContain("connection refused before first byte");
     expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
   });
+
+  it("(e-stream) degraded stream: SSE comment marker + flagged sub-call telemetry + finish_reason", async () => {
+    // Fleet fails before the first yield → the stream degrades. Headers are
+    // already sent, so the marker rides as an SSE comment line; the finish
+    // chunk still carries its finish_reason; the sub-call telemetry event
+    // is flagged degraded (constraint 10, streaming path).
+    const degradedStream: StreamEvent[] = [
+      { type: "delta", content: "degraded " },
+      { type: "delta", content: "stream answer" },
+      { type: "finish", finishReason: "stop", usage: { promptTokens: 7, completionTokens: 3 }, degraded: true },
+    ];
+    const h = makeHarness({
+      onChat: (params) => {
+        if (callRole(params) !== "direct") throw new Error("scripted fleet failure");
+        return { content: "unused", finishReason: "stop" };
+      },
+      onStream: (params) => {
+        if (callRole(params) === "direct") return degradedStream;
+        throw new Error("scripted fleet stream failure");
+      },
+    });
+
+    const res = await chat(h.app, { messages: conversation(8, 100), stream: true });
+
+    expect(res.statusCode).toBe(200);
+    // The SSE comment marker (headers were already sent; the header cannot be).
+    expect(res.body).toContain(": x-context-hierarchy-degraded: true");
+    // The degraded answer itself streamed through (as separate delta chunks),
+    // and the finish chunk carried its finish_reason (never a null here).
+    expect(res.body).toContain('"content":"degraded "');
+    expect(res.body).toContain('"content":"stream answer"');
+    expect(res.body).toContain('"finish_reason":"stop"');
+    expect(res.body).not.toContain('"finish_reason":null');
+    expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
+    // Sub-call telemetry carries the degraded flag.
+    const subcalls = h.telemetry
+      .entries()
+      .filter((e) => (e as Record<string, unknown>).kind === "subcall") as Array<
+      Record<string, unknown>
+    >;
+    expect(subcalls.some((e) => e.degraded === true && e.call === "direct")).toBe(true);
+  });
+
+  it("(e-stream') a degraded stream WITHOUT a finish synthesizes finish_reason: null (SDK-clean end)", async () => {
+    // The degraded direct stream ended without a finish event: the engine
+    // synthesizes a degraded finish; the proxy maps its empty reason to null
+    // so OpenAI clients see a terminal chunk (the e2e SDK path resolves).
+    const h = makeHarness({
+      onChat: (params) => {
+        if (callRole(params) !== "direct") throw new Error("scripted fleet failure");
+        return { content: "unused", finishReason: "stop" };
+      },
+      onStream: (params) => {
+        if (callRole(params) === "direct") return [{ type: "delta", content: "partial" }];
+        throw new Error("scripted fleet stream failure");
+      },
+    });
+
+    const res = await chat(h.app, { messages: conversation(8, 100), stream: true });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(": x-context-hierarchy-degraded: true");
+    expect(res.body).toContain('"finish_reason":null');
+    expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
 });
 
 describe("GET /v1/models", () => {

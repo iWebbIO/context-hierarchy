@@ -6,7 +6,10 @@
 //     is SYNTHETIC: summed across every sub-call of the request (usage fields
 //     when a sub-call reported them, its estimate otherwise; a passthrough
 //     direct call's single event IS its own usage). A degraded engine result
-//     adds the `x-context-hierarchy-degraded: true` header.
+//     adds the `x-context-hierarchy-degraded: true` header; a degraded STREAM
+//     (headers already sent) is marked by an SSE comment line
+//     `: x-context-hierarchy-degraded: true` — and both paths carry the
+//     degraded flag on their sub-call telemetry events.
 //   GET  /v1/models — passthrough of `adapter.models()`.
 //
 // Sub-call collection: the engine reports sub-calls through its constructor
@@ -407,7 +410,13 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
             } else {
               finishReason = event.finishReason;
               if (event.usage !== undefined) finishUsage = event.usage;
-              push(chunk([{ index: 0, delta: {}, finish_reason: event.finishReason }]));
+              // A degraded stream is marked on the wire: the HTTP header
+              // cannot be set anymore (SSE headers are already sent), so the
+              // marker rides as an SSE comment line — visible to humans and
+              // debug tooling, ignored by spec-compliant SSE parsers — plus
+              // the degraded flag on the sub-call telemetry event.
+              if (event.degraded) sse.push(": x-context-hierarchy-degraded: true\n\n");
+              push(chunk([{ index: 0, delta: {}, finish_reason: event.finishReason || null }]));
             }
           }
         });

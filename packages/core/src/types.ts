@@ -65,8 +65,13 @@ export interface ToolCallDelta {
   argumentsDelta?: string;
 }
 
-/** Events yielded by `ProviderAdapter.stream`, in SSE arrival order. */
+/**
+ * Events yielded by `ProviderAdapter.stream`, in SSE arrival order. The
+ * optional `degraded` field on a finish event is set by FleetEngine when the
+ * stream came from the degraded fallback path (global constraint 10's
+ * "marked degraded" where no HTTP header can be set anymore).
+ */
 export type StreamEvent =
   | { type: "delta"; content?: string; toolCallDeltas?: ToolCallDelta[] }
-  | { type: "finish"; finishReason: string; usage?: Usage }
+  | { type: "finish"; finishReason: string; usage?: Usage; degraded?: true }
   | { type: "error"; message: string };

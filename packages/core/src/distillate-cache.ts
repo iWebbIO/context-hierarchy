@@ -7,7 +7,10 @@
 // Entries are JSON files under `${dataDir}/cache/<key>.json`, written ONCE
 // (open-exclusive "wx"); an existing file is never rewritten — append-only,
 // like the rest of the persistence in this repo. A missing or corrupt file
-// reads as a miss (null); the cache is best-effort and never throws on read.
+// reads as a miss (null); the cache is best-effort and NEVER throws — not on
+// read, and not on write: a failed put must never corrupt the request it was
+// trying to accelerate (turn an already-delivered answer into an error, or a
+// successful fleet run into a degraded re-dispatch).
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -105,21 +108,24 @@ export class DistillateCache {
   }
 
   /**
-   * Persist a distillate. The file is created with open-exclusive semantics:
-   * if it already exists the write is skipped — files are written once and
-   * never rewritten (append-only). A same-key race resolves benignly (both
-   * writers hold the same content).
+   * Persist a distillate, best-effort. The file is created with
+   * open-exclusive semantics: if it already exists the write is skipped —
+   * files are written once and never rewritten (append-only). A same-key
+   * race resolves benignly (both writers hold the same content). ANY other
+   * failure is swallowed: the cache is an accelerator, and a persistence
+   * failure must never change the outcome of the request that produced the
+   * distillate — the caller already holds the fleet result either way.
    */
   async put(key: string, distillate: Distillate): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
     try {
+      await mkdir(this.dir, { recursive: true });
       await writeFile(this.path(key), JSON.stringify(distillate, null, 2), {
         encoding: "utf8",
         flag: "wx",
       });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "EEXIST") return; // written once, never rewritten
-      throw e;
+      // Best-effort by contract: swallow, never throw over a cache write.
     }
   }
 }
