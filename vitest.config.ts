@@ -3,6 +3,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     passWithNoTests: true,
-    projects: ["packages/core", "packages/proxy"],
+    projects: ["packages/core", "packages/proxy", "packages/benchmark", "packages/cli"],
   },
 });
