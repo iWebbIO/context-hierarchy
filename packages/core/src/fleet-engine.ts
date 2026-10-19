@@ -7,7 +7,7 @@
 // fleet degenerates to a single synthesizer call over system + tail.
 //
 // The dispatch funnel (global constraint 1): EVERY outgoing adapter call —
-// direct, planner, worker, synthesizer, streamed or not — goes through
+// direct, planner, worker, reducer, synthesizer, streamed or not — goes through
 // `dispatch`/`dispatchStream`, which estimates first and strategy-fits any
 // over-cap message list before it leaves. A post-fit estimate still over
 // the cap is an engine bug: `InternalCapViolation` is thrown, never a silent
@@ -17,9 +17,12 @@
 // Fleet pipeline (run + stream share it):
 //   cache miss → TOC (deterministic, no LLM) → planner (LLM, ≤ 500 max
 //   tokens, any failure → fixed map-reduce fallback) → workers (≤ maxWorkers
-//   in flight, each compressing its verbatim slice under the cap) →
-//   synthesizer ([system] + [wrapped digests] + [original last user
-//   message]) → distillate put (digests + final).
+//   in flight, each compressing its verbatim slice under the cap) → digest
+//   bounding (over-budget digest blocks are REDUCED — merged by further
+//   capped reducer calls, at most 2 levels, then middle-cut as text; the
+//   block is never dropped, because it is the only carrier of the middle
+//   region) → synthesizer ([system] + [wrapped digests] + [original last
+//   user message]) → distillate put (bounded digests + final).
 //
 // Degradation (global constraint 10, owned HERE): run() wraps the whole
 // fleet path in a try/catch — ANY failure falls back to strategy-fitting
@@ -81,6 +84,20 @@ const TOC_PREVIEW_CHARS = 60;
 /** Cache-replay delta chunk size, in tokens (brief R2: "~20-token chunks"). */
 const REPLAY_CHUNK_TOKENS = 20;
 
+/** Reducer instruction: merge digest blocks into one bounded digest. */
+const REDUCE_INSTRUCTION =
+  "Each block below is a digest of one part of a longer conversation. Merge them into ONE dense digest covering all parts, in order. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.";
+
+/** Reducer output budget. */
+const REDUCE_MAX_TOKENS = 1000;
+/** Headroom over the non-digest part of the synthesizer prompt (wrappers, joins). */
+const DIGEST_BLOCK_MARGIN = 250;
+/** Reduce passes over the digests before the text middle-cut fallback. */
+const MAX_REDUCE_LEVELS = 2;
+/** Below this available budget, digest bounding is skipped — the dispatch fit
+ * and the degradation path own such degenerate caps. */
+const MIN_DIGEST_BUDGET = 200;
+
 /** Planner instruction (brief R2: output ONLY a JSON array of assignments). */
 const PLANNER_INSTRUCTION = [
   "You are planning the compression of a conversation for a model with a small context window.",
@@ -93,7 +110,7 @@ const PLANNER_INSTRUCTION = [
 
 /** One telemetry event per completed model call (plan contract, task 5). */
 export interface SubCallEvent {
-  call: "direct" | "planner" | "worker" | "synthesizer";
+  call: "direct" | "planner" | "worker" | "reducer" | "synthesizer";
   estimatedTokens: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -162,6 +179,33 @@ function decompose(messages: ChatMessage[]): Decomposition {
 interface WorkerSlice {
   indices: number[];
   budgetTokens: number;
+}
+
+/**
+ * Last-resort text fit for the digest block: keep verbatim head and tail
+ * slices and mark the elided middle (the same marker style the
+ * TruncationStrategy uses for messages). The block is never dropped, only
+ * shortened. Halving converges well inside MIN_DIGEST_BUDGET-sized budgets.
+ */
+function middleCutText(
+  text: string,
+  budgetTokens: number,
+  estimate: (text: string) => number,
+): string {
+  const markerFor = (removedTokens: number): string =>
+    `[... context-hierarchy: elided ~${removedTokens} tokens ...]`;
+  // ~4 chars per token is a serviceable first split for cl100k English text.
+  let keepTokens = Math.max(1, Math.floor(budgetTokens / 2));
+  let result = text;
+  for (let attempt = 0; attempt < 16 && keepTokens > 0; attempt++) {
+    const head = text.slice(0, keepTokens * 4);
+    const tail = text.slice(Math.max(0, text.length - keepTokens * 4));
+    const removed = Math.max(0, estimate(text) - 2 * keepTokens);
+    result = `${head}\n${markerFor(removed)}\n${tail}`;
+    if (estimate(result) <= budgetTokens) return result;
+    keepTokens = Math.max(1, Math.floor(keepTokens / 2));
+  }
+  return result;
 }
 
 /** What the shared fleet pipeline produced for one request. */
@@ -418,18 +462,28 @@ export class FleetEngine {
     toc: string,
     decomp: Decomposition,
   ): Promise<WorkerSlice[] | undefined> {
-    const plannerMessages: ChatMessage[] = [
-      { role: "user", content: toc },
-      ...(decomp.lastUserIdx >= 0 ? [params.messages[decomp.lastUserIdx]] : []),
-      { role: "user", content: PLANNER_INSTRUCTION },
-    ];
+    // ONE user message (TOC + the original ask + instruction): some strict
+    // upstreams reject consecutive same-role turns, and a single block is
+    // easier for a small model to follow.
+    const parts: string[] = [toc];
+    if (decomp.lastUserIdx >= 0) {
+      parts.push(`The user's request:\n${params.messages[decomp.lastUserIdx].content}`);
+    }
+    parts.push(PLANNER_INSTRUCTION);
+    const plannerMessages: ChatMessage[] = [{ role: "user", content: parts.join("\n\n---\n\n") }];
     try {
       const result = await this.dispatch(
         { model: this.model, messages: plannerMessages, max_tokens: PLANNER_MAX_TOKENS },
         "planner",
       );
       return parseAssignments(result.content, params.messages.length, decomp.middleIdx);
-    } catch {
+    } catch (error) {
+      // ANY dispatch failure falls back to map-reduce — but never silently:
+      // the reason is logged so a transient upstream error is diagnosable.
+      console.error(
+        "[context-hierarchy] planner failed (%s); using map-reduce fallback",
+        error instanceof Error ? error.message : String(error),
+      );
       return undefined;
     }
   }
@@ -496,6 +550,14 @@ export class FleetEngine {
   }
 
   /**
+   * The digest block format, shared by the synthesizer prompt and the
+   * budget estimator so the estimate is exact.
+   */
+  private joinDigests(digests: string[]): string {
+    return digests.map((digest, i) => `[digest ${i + 1}]\n${digest}\n]`).join("\n");
+  }
+
+  /**
    * The synthesizer prompt: [all system messages] + [one message joining the
    * wrapped digests, in order] + [the ORIGINAL last user message, verbatim,
    * last]. No max_tokens — the model default for run(); the stream path
@@ -504,11 +566,98 @@ export class FleetEngine {
   private synthesizerParams(params: ChatParams, digests: string[], decomp: Decomposition): ChatParams {
     const messages: ChatMessage[] = decomp.systemIdx.map((i) => params.messages[i]);
     if (digests.length > 0) {
-      const block = digests.map((digest, i) => `[digest ${i + 1}]\n${digest}\n]`).join("\n");
-      messages.push({ role: "user", content: block });
+      messages.push({ role: "user", content: this.joinDigests(digests) });
     }
     if (decomp.lastUserIdx >= 0) messages.push(params.messages[decomp.lastUserIdx]);
     return { model: this.model, messages };
+  }
+
+  /**
+   * Bound the digest block to the synthesizer's available budget. The digest
+   * block is the ONLY carrier of the middle region — a generic strategy fit
+   * treats an oversized block as an ordinary message and drops it whole
+   * (observed live: the synthesizer dispatched with the ask but no digests).
+   * Over-budget digests are REDUCED — merged by further capped "reducer"
+   * calls, at most MAX_REDUCE_LEVELS passes — and only if reduction cannot
+   * keep up, middle-cut as text. The block is never dropped.
+   */
+  private async boundDigests(
+    digests: string[],
+    params: ChatParams,
+    decomp: Decomposition,
+  ): Promise<string[]> {
+    if (digests.length === 0) return digests;
+    const estimateText = (text: string): number =>
+      this.accountant.estimate([{ role: "user", content: text }], this.model);
+    const overhead: ChatMessage[] = [
+      ...decomp.systemIdx.map((i) => params.messages[i]),
+      ...(decomp.lastUserIdx >= 0 ? [params.messages[decomp.lastUserIdx]] : []),
+    ];
+    const available =
+      this.capTokens - this.accountant.estimate(overhead, this.model) - DIGEST_BLOCK_MARGIN;
+    if (available < MIN_DIGEST_BUDGET) return digests;
+
+    let current = digests;
+    for (let level = 0; level < MAX_REDUCE_LEVELS; level++) {
+      if (estimateText(this.joinDigests(current)) <= available) return current;
+      const room = available - estimateText(REDUCE_INSTRUCTION);
+      // Greedy-pack digests into groups whose joined block fits `room`. The
+      // packer's own singleton check (below) handles a room too small to
+      // merge anything — no extra floor here to misfire before it.
+      const groups: string[][] = [];
+      let group: string[] = [];
+      for (const digest of current) {
+        const candidate = [...group, digest];
+        if (group.length > 0 && estimateText(this.joinDigests(candidate)) > room) {
+          groups.push(group);
+          group = [digest];
+        } else {
+          group = candidate;
+        }
+      }
+      if (group.length > 0) groups.push(group);
+      if (groups.length === current.length) break; // single digests already exceed room
+      current = await this.reduceGroups(groups);
+    }
+
+    const block = this.joinDigests(current);
+    if (estimateText(block) > available) {
+      return [middleCutText(block, available, estimateText)];
+    }
+    return current;
+  }
+
+  /**
+   * One reducer call per group (≤ maxWorkers in flight), each a capped
+   * dispatch like any other. Mirrors runWorkers' lane structure.
+   */
+  private async reduceGroups(groups: string[][]): Promise<string[]> {
+    const digests: string[] = new Array<string>(groups.length);
+    const laneCount = Math.max(1, Math.min(this.maxWorkers, groups.length));
+    let nextGroup = 0;
+    const lane = async (): Promise<void> => {
+      for (;;) {
+        const k = nextGroup++;
+        if (k >= groups.length) return;
+        const result = await this.dispatch(
+          {
+            model: this.model,
+            messages: [
+              { role: "user", content: `${REDUCE_INSTRUCTION}\n\n${this.joinDigests(groups[k])}` },
+            ],
+            max_tokens: REDUCE_MAX_TOKENS,
+          },
+          "reducer",
+        );
+        digests[k] = result.content;
+      }
+    };
+    const lanes: Promise<void>[] = [];
+    for (let i = 0; i < laneCount; i++) lanes.push(lane());
+    const settled = await Promise.allSettled(lanes);
+    const failure = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+    if (failure) throw failure.reason;
+    return digests;
   }
 
   /** TOC → planner (or fallback) → workers. Shared by run() and stream(). */
@@ -586,10 +735,11 @@ export class FleetEngine {
     }
     try {
       const { digests, decomp } = await this.planAndCompress(params);
-      const synth = await this.dispatch(this.synthesizerParams(params, digests, decomp), "synthesizer");
+      const bounded = await this.boundDigests(digests, params, decomp);
+      const synth = await this.dispatch(this.synthesizerParams(params, bounded, decomp), "synthesizer");
       const final: DistillateFinal = { content: synth.content, finishReason: synth.finishReason };
       if (synth.usage !== undefined) final.usage = synth.usage;
-      await this.cache.put(key, { digests, final });
+      await this.cache.put(key, { digests: bounded, final });
       return synth;
     } catch {
       // ANY fleet-path failure → degraded single direct call. Upstream
@@ -625,7 +775,8 @@ export class FleetEngine {
     let deliveredAny = false;
     try {
       const { digests, decomp } = await this.planAndCompress(params);
-      const synthesizer = this.synthesizerParams(params, digests, decomp);
+      const bounded = await this.boundDigests(digests, params, decomp);
+      const synthesizer = this.synthesizerParams(params, bounded, decomp);
       let content = "";
       let finishReason: string | undefined;
       let usage: Usage | undefined;
@@ -643,7 +794,7 @@ export class FleetEngine {
         // stream that ended without a finish event caches nothing.
         const final: DistillateFinal = { content, finishReason };
         if (usage !== undefined) final.usage = usage;
-        await this.cache.put(key, { digests, final });
+        await this.cache.put(key, { digests: bounded, final });
       }
     } catch (e) {
       if (deliveredAny) throw e; // degrading now would duplicate already-yielded output

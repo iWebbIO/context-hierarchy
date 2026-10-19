@@ -6,6 +6,7 @@
 // Call classification (the adapter only sees params; roles are inferred from
 // the shapes the engine builds):
 //   worker       — carries the verbatim WORKER_INSTRUCTION message
+//   reducer      — starts with the verbatim REDUCE_INSTRUCTION
 //   planner      — max_tokens 500 (the engine's planner budget)
 //   synthesizer  — contains a "[digest 1]" wrap
 //   direct       — everything else (passthrough, degraded)
@@ -13,7 +14,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { countTokens, FleetEngine, TokenAccountant, TruncationStrategy } from "../src/index.js";
 import type {
   ChatMessage,
@@ -30,6 +31,12 @@ const MODEL = "fleet-test-model";
 // exact string both classifies calls and pins the text the engine must send.
 const WORKER_INSTRUCTION =
   "Compress your assigned slice into a dense digest. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.";
+
+// The reducer instruction, VERBATIM from the engine (fleet-engine.ts) —
+// matching on the exact string classifies reducer calls the way the engine
+// builds them.
+const REDUCE_INSTRUCTION =
+  "Each block below is a digest of one part of a longer conversation. Merge them into ONE dense digest covering all parts, in order. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.";
 
 // Deterministic content builder (same convention as the other suites).
 function text(words: number, word = "lorem"): string {
@@ -51,10 +58,11 @@ function conversation(middleCount: number, wordsPerMessage: number): ChatMessage
   return messages;
 }
 
-type CallRole = "planner" | "worker" | "synthesizer" | "direct";
+type CallRole = "planner" | "worker" | "reducer" | "synthesizer" | "direct";
 
 function callRole(params: ChatParams): CallRole {
   if (params.messages.some((m) => m.content === WORKER_INSTRUCTION)) return "worker";
+  if (params.messages.some((m) => m.content.startsWith(REDUCE_INSTRUCTION))) return "reducer";
   if (params.max_tokens === 500) return "planner";
   if (params.messages.some((m) => m.content.includes("[digest 1]"))) return "synthesizer";
   return "direct";
@@ -84,11 +92,13 @@ interface FleetScriptOptions {
   plannerContent: string;
   /** Digest text a worker returns; default distinguishes slices by first message. */
   digestOf?: (params: ChatParams) => string;
+  /** Reducer output; default reports how many parts it merged. */
+  reduceOf?: (params: ChatParams) => string;
   synthContent?: string;
   directResult?: ChatResult;
 }
 
-/** A standard fleet script: planner content, worker digests, synthesizer, direct. */
+/** A standard fleet script: planner content, worker digests, reducer, synthesizer, direct. */
 function fleetScript(opts: FleetScriptOptions): (params: ChatParams) => ChatResult {
   return (params) => {
     switch (callRole(params)) {
@@ -102,6 +112,12 @@ function fleetScript(opts: FleetScriptOptions): (params: ChatParams) => ChatResu
           finishReason: "stop",
           usage: { promptTokens: 100, completionTokens: 50 },
         };
+      }
+      case "reducer": {
+        const reduceOf =
+          opts.reduceOf ??
+          ((p: ChatParams) => `merged(${p.messages[0].content.split("[digest ").length - 1} parts)`);
+        return { content: reduceOf(params), finishReason: "stop" };
       }
       case "synthesizer":
         return {
@@ -149,6 +165,7 @@ function makeHarness(opts: {
 
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop() as string, { recursive: true, force: true });
+  vi.restoreAllMocks(); // console spies never leak between tests
 });
 
 /** The engine cap every over-cap scenario runs with (full estimate ≈ 1.8× this). */
@@ -239,17 +256,21 @@ describe("FleetEngine.run", () => {
 
     const [planner, worker0, worker1, synth] = fake.calls;
 
-    // Planner: TOC + ORIGINAL last user message + instruction, max_tokens 500.
+    // Planner: ONE user message (TOC + the original ask + instruction),
+    // max_tokens 500 — consecutive same-role turns are rejected by strict
+    // upstreams, so the three parts are joined into a single block.
     expect(planner.max_tokens).toBe(500);
-    expect(planner.messages.length).toBe(3);
-    const tocLines = planner.messages[0].content.split("\n");
+    expect(planner.messages.length).toBe(1);
+    expect(planner.messages[0].role).toBe("user");
+    const plannerBody = planner.messages[0].content;
+    const tocLines = plannerBody.split("\n").filter((l) => /^#\d+ /.test(l));
     expect(tocLines.length).toBe(messages.length); // one line per message, no embedded newlines
     tocLines.forEach((line, i) => {
       expect(line).toMatch(new RegExp(`^#${i} (system|user|assistant|tool) ~\\d+t: .{0,60}$`));
     });
-    expect(planner.messages[1]).toEqual(messages[9]); // the original last user message
-    expect(planner.messages[2].content).toContain("JSON array");
-    expect(planner.messages[2].content).toContain("budgetTokens");
+    expect(plannerBody).toContain(`The user's request:\n${messages[9].content}`);
+    expect(plannerBody).toContain("JSON array");
+    expect(plannerBody).toContain("budgetTokens");
 
     // Workers: their assigned VERBATIM slices + the instruction line, with
     // the assigned budgets as max_tokens.
@@ -271,6 +292,104 @@ describe("FleetEngine.run", () => {
       content: `[digest 1]\n${digest0}\n]\n[digest 2]\n${digest1}\n]`,
     });
     expect(synth.messages[2]).toEqual(messages[9]);
+  });
+
+  it("(b-bound) over-budget digests are REDUCED — the synthesizer always receives the digest block", async () => {
+    // Regression guard for the live failure this stage exists for: fat worker
+    // digests whose joined block overflows the synthesizer budget used to be
+    // dropped WHOLE by the generic strategy fit, and the synthesizer answered
+    // with no knowledge of the middle region. Now: reducer calls merge the
+    // digests under the budget, and the synthesizer prompt still carries them.
+    const fourSlices = JSON.stringify([
+      { start: 1, end: 2, budgetTokens: 100 },
+      { start: 3, end: 4, budgetTokens: 100 },
+      { start: 5, end: 6, budgetTokens: 100 },
+      { start: 7, end: 8, budgetTokens: 100 },
+    ]);
+    const fake = new FakeAdapter(
+      fleetScript({
+        plannerContent: fourSlices,
+        // Each digest is FAT (~150+ tokens fresh, still oversized for a
+        // calibrated-down accountant): four joined overflow the synthesizer's
+        // digest budget under any calibration, but PAIRS fit a reducer's
+        // room — the reduce path. (Test (h-cal) shows calibration moves the
+        // factor below 1.0 during a run; sizes are chosen to survive that.)
+        digestOf: (p) => `digest-${p.messages[0].content.slice(0, 8)}: ${text(120)}`,
+      }),
+      () => [],
+    );
+    const messages = conversation(8, 100);
+    const { engine, events, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    const cap = assertOverCap(accountant, messages);
+
+    const result = await engine.run({ model: MODEL, messages });
+
+    expect(result.content).toBe("synthesized fleet answer");
+    expect(result.degraded).toBeUndefined();
+    const roles = rolesOf(fake);
+    expect(roles.filter((r) => r === "planner").length).toBe(1);
+    expect(roles.filter((r) => r === "worker").length).toBe(4);
+    expect(roles.filter((r) => r === "reducer").length).toBe(2);
+    expect(roles.filter((r) => r === "synthesizer").length).toBe(1);
+    expect(roles).not.toContain("direct");
+
+    // Reducer calls: ONE user message starting with the instruction, carrying
+    // its group's ORIGINAL digests in order (wrap numbers are per-group),
+    // capped output budget.
+    const reducers = fake.calls.filter((c) => callRole(c) === "reducer");
+    expect(reducers[0].max_tokens).toBe(1000);
+    expect(reducers[0].messages.length).toBe(1);
+    expect(reducers[0].messages[0].content.startsWith(REDUCE_INSTRUCTION)).toBe(true);
+    expect(reducers[0].messages[0].content).toContain("digest-middle-0");
+    expect(reducers[0].messages[0].content).toContain("digest-middle-2");
+    expect(reducers[1].messages[0].content).toContain("digest-middle-4");
+    expect(reducers[1].messages[0].content).toContain("digest-middle-6");
+
+    // The synthesizer received the MERGED digests, not the fat originals —
+    // and its prompt fits the cap (the funnel's fit never needed to drop it).
+    const synth = fake.calls.find((c) => callRole(c) === "synthesizer") as ChatParams;
+    const block = synth.messages[1].content as string;
+    expect(block).toContain("[digest 1]");
+    expect((block.match(/merged\(2 parts\)/g) ?? []).length).toBe(2);
+    expect(block).not.toContain("lorem"); // no raw fat digest survived
+    expect(accountant.estimate(synth.messages, MODEL)).toBeLessThanOrEqual(cap);
+    for (const call of fake.calls) {
+      expect(accountant.estimate(call.messages, MODEL)).toBeLessThanOrEqual(cap);
+    }
+    expect(events.map((e) => e.call)).toContain("reducer");
+  });
+
+  it("(b-bound') digests too fat to reduce are middle-cut as text — the block is NEVER dropped", async () => {
+    // Two digests so fat that even one alone exceeds a reducer's room: the
+    // last resort is a text middle-cut of the joined block (verbatim head +
+    // marker + verbatim tail). The synthesizer still receives a [digest 1]
+    // wrap — the drop-whole failure mode can never recur.
+    const fake = new FakeAdapter(
+      fleetScript({
+        plannerContent: HAPPY_PLAN,
+        digestOf: () => `fat: ${text(200)}`,
+      }),
+      () => [],
+    );
+    const messages = conversation(8, 100);
+    const { engine, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    const cap = assertOverCap(accountant, messages);
+
+    const result = await engine.run({ model: MODEL, messages });
+
+    expect(result.content).toBe("synthesized fleet answer");
+    expect(result.degraded).toBeUndefined();
+    const roles = rolesOf(fake);
+    expect(roles).not.toContain("reducer"); // too fat to group — straight to the cut
+    expect(roles).not.toContain("direct");
+
+    const synth = fake.calls.find((c) => callRole(c) === "synthesizer") as ChatParams;
+    expect(synth.messages.length).toBe(3); // system + digest block + original ask
+    const block = synth.messages[1].content as string;
+    expect(block).toContain("[digest 1]"); // the block is present, always
+    expect(block).toContain("context-hierarchy: elided ~"); // the cut is marked
+    expect(block).toContain("fat:"); // verbatim head/tail survived
+    expect(accountant.estimate(synth.messages, MODEL)).toBeLessThanOrEqual(cap);
   });
 
   it("(c) planner garbage → fixed map-reduce fallback still completes", async () => {
@@ -309,6 +428,9 @@ describe("FleetEngine.run", () => {
     // fallback" — a thrown planner call is no exception. Only the planner
     // role fails here; the fleet must still complete, undegraded. (A fake that
     // fails the whole fleet path is case (g) below.)
+    // The failure is LOGGED, never silent — assert the log line, keep the
+    // output pristine.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const fake = new FakeAdapter(
       (params) => {
         if (callRole(params) === "planner") throw new Error("planner upstream error (scripted)");
@@ -322,6 +444,10 @@ describe("FleetEngine.run", () => {
 
     const result = await engine.run({ model: MODEL, messages });
 
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[context-hierarchy] planner failed (%s); using map-reduce fallback",
+      "planner upstream error (scripted)",
+    );
     expect(result.content).toBe("synthesized fleet answer");
     expect(result.degraded).toBeUndefined();
     const roles = rolesOf(fake);
@@ -452,6 +578,7 @@ describe("FleetEngine.run", () => {
     // The fake throws for every fleet role (the planner failure alone would
     // trigger the map-reduce fallback, so the workers fail too — that is the
     // fleet failure degradation exists for) and answers direct calls.
+    vi.spyOn(console, "error").mockImplementation(() => {}); // the planner failure logs
     const fake = new FakeAdapter(
       (params) => {
         if (callRole(params) !== "direct") throw new Error("upstream fleet call failed (scripted)");
@@ -753,6 +880,7 @@ describe("FleetEngine.stream", () => {
     // The fleet fails before anything was yielded → the stream degrades to one
     // direct stream (constraint 10), and the degradation is MARKED: the finish
     // event carries `degraded: true` and the sub-call event is flagged.
+    vi.spyOn(console, "error").mockImplementation(() => {}); // the planner failure logs
     const degradedStream: StreamEvent[] = [
       { type: "delta", content: "degraded " },
       { type: "delta", content: "stream answer" },
@@ -800,6 +928,7 @@ describe("FleetEngine.stream", () => {
   it("(g-stream') a degraded stream that ends without a finish gets a synthesized degraded finish", async () => {
     // The upstream cut the connection (no finish event) — the degraded marker
     // must not be silently lost; a synthetic degraded finish is appended.
+    vi.spyOn(console, "error").mockImplementation(() => {}); // the planner failure logs
     const fake = new FakeAdapter(
       (params) => {
         if (callRole(params) !== "direct") throw new Error("fleet fails (scripted)");
