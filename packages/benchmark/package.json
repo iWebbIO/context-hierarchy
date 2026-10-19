@@ -1,0 +1,14 @@
+{
+  "name": "@context-hierarchy/benchmark",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@context-hierarchy/core": "*",
+    "@context-hierarchy/proxy": "*"
+  }
+}
