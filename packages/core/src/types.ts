@@ -46,6 +46,12 @@ export interface ChatResult {
   toolCalls?: ToolCall[];
   finishReason: string;
   usage?: Usage;
+  /**
+   * Set by FleetEngine when this result came from the degraded path (a fleet
+   * failure answered by one truncation-fit direct call) — global constraint
+   * 10. Absent on every other result, including cache replays.
+   */
+  degraded?: boolean;
 }
 
 /**
