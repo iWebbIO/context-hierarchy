@@ -16,11 +16,15 @@
 - `DistillateCache` (content-addressed, append-only, best-effort writes) +
   `EngineSpillStore` (durable, hash-verified spill records for every
   engine-initiated strategy fit — worker slices, synthesizer, degraded fits —
-  restorable by pointer) + `FleetEngine` — TOC → planner → budgeted workers →
-  synthesizer; hard-cap invariant on every outgoing call; identical-request
-  replay with zero model calls; graceful degradation to a truncation-fitted
-  direct call, marked degraded (ChatResult flag + sub-call telemetry event on
-  non-stream; degraded finish event + SSE comment marker on stream).
+  restorable by pointer) + `FleetEngine` — TOC → planner (single-message
+  prompt; any failure is logged and takes the fixed map-reduce fallback) →
+  budgeted workers → reducer (over-budget digest blocks are merged by further
+  capped reducer calls, then middle-cut as text — the block, the only carrier
+  of the middle region, is never dropped) → synthesizer; hard-cap invariant
+  on every outgoing call; identical-request replay with zero model calls;
+  graceful degradation to a truncation-fitted direct call, marked degraded
+  (ChatResult flag + sub-call telemetry event on non-stream; degraded finish
+  event + SSE comment marker on stream).
 - `@context-hierarchy/proxy` — Fastify server: `POST /v1/chat/completions`
   (non-stream + SSE stream, synthetic usage summed across sub-calls,
   `x-context-hierarchy-degraded` header, `content: null` tool-call round-trips),
