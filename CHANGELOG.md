@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 — M2+M3: benchmark rig + ctxh CLI (unreleased)
+
+- `@context-hierarchy/benchmark` — the strategy × cap rig: 18
+  contamination-proof tasks (12 synthetic over fictional port logs —
+  needle/multihop/update-tracking/count-aggregate at ~3k/8k/15k haystacks,
+  6 coding-comprehension over an embedded mini-repo) with programmatic
+  ground truths and an integrity suite that re-derives them; five arms
+  (fleet, map-reduce via the `plannerDisabled` engine option,
+  solo-hierarchy, truncation baseline, uncapped reference); a grid runner
+  with fresh per-run state (cache-defeat), bounded concurrency, and
+  wall-clock guards; pure exact/contains/numeric verification (no LLM
+  judges); markdown/JSON reporting; a `--dry-run` CLI.
+- `context-hierarchy` (packages/cli, bin `ctxh`) — the coding-harness CLI:
+  `serve` (start the proxy), `ask` (one-shot through the in-process capped
+  engine, `--cap/--model/--stats`), `config` (key masked); hand-rolled
+  args; publish-prepped (`npm pack` ships dist only).
+- All packages now emit `.d.ts`; the ambient proxy-type shims are gone.
+
 ## 0.1.0 — M1: core library + capped proxy (unreleased)
 
 - `@context-hierarchy/core` — `TokenAccountant` (js-tiktoken counts × margin,

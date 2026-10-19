@@ -13,6 +13,8 @@
     "e2e": "vitest run -c vitest.e2e.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "build": "npm run build --workspaces",
+    "benchmark": "node packages/benchmark/dist/run.js",
+    "benchmark:dry": "node packages/benchmark/dist/run.js --dry-run",
     "start": "npm run build && node packages/proxy/dist/main.js"
   },
   "devDependencies": {
