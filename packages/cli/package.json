@@ -1,0 +1,33 @@
+{
+  "name": "context-hierarchy",
+  "version": "0.1.0",
+  "description": "ctxh — the context-hierarchy coding-harness CLI: ask questions through the capped engine in-process, or serve the OpenAI-compatible proxy.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iWebbIO/context-hierarchy.git"
+  },
+  "homepage": "https://github.com/iWebbIO/context-hierarchy#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "ctxh": "dist/run.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "start": "node dist/run.js serve"
+  },
+  "dependencies": {
+    "@context-hierarchy/core": "*",
+    "@context-hierarchy/proxy": "*"
+  }
+}
