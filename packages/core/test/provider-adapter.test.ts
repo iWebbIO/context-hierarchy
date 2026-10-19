@@ -293,7 +293,7 @@ describe("ProviderAdapter.stream", () => {
     // top level of the chunk, no choices array at all. Without the top-level
     // check the chunk would fall through the choices `continue` and the
     // stream would END CLEANLY — the failure indistinguishable from a normal
-    // end (the final-review honesty finding this pins).
+    // end.
     const { adapter, calls } = adapterFor([
       {
         kind: "response",

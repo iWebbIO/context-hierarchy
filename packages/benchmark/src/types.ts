@@ -1,14 +1,9 @@
-// The pinned benchmark-task format (M2 Track B brief) — the contract the
-// task suites under tasks/ implement. Duplicated here BY DESIGN: tasks/ is
-// owned by a parallel track whose `../tasks/index.js` module may not exist
-// when the rig is being developed, so the rig cannot type-import from it
-// without breaking `tsc -p .` and the repo-root typecheck. The loader
-// (src/tasks.ts) validates every loaded task against THIS shape at runtime,
-// so a drifted task suite fails loudly at load time instead of typechecking
-// against a stale duplicate silently.
-//
-// If the pinned format ever changes, change it here AND in the brief — the
-// two must stay in lockstep.
+// The pinned benchmark-task format — the contract the suites under tasks/
+// implement. Duplicated there by design: the rig loads the suites at runtime
+// (src/tasks.ts) and validates them against THIS shape, so a drifted suite
+// fails loudly at load time instead of silently typechecking against a
+// stale copy. If the format ever changes, change it here and in tasks/types.ts
+// together.
 
 import type { ChatMessage } from "@context-hierarchy/core";
 
@@ -24,7 +19,7 @@ export interface TaskVerify {
   expected: string;
 }
 
-/** One benchmark task (pinned format, brief §"Pinned task format"). */
+/** One benchmark task (the pinned format). */
 export interface BenchmarkTask {
   id: string;
   kind: "synthetic" | "coding";

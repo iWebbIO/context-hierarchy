@@ -1,5 +1,5 @@
-// Telemetry unit tests (task-6 brief R1): JSONL append with mkdir-as-needed,
-// the engine's SubCallEvent accepted verbatim, entries() read-back, and the
+// Telemetry unit tests: JSONL append with mkdir-as-needed, the engine's
+// SubCallEvent accepted verbatim, entries() read-back, and the
 // never-throws guarantee. Everything happens in a temp directory.
 
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -76,7 +76,7 @@ describe("Telemetry", () => {
     expect(entries[1].cacheHit).toBe(true);
   });
 
-  it("logSubCall records the degraded flag (constraint 10's telemetry marking)", () => {
+  it("logSubCall records the degraded flag in telemetry", () => {
     const dir = tempDir("ctxh-telemetry-test-");
     const telemetry = new Telemetry(join(dir, "telemetry.jsonl"));
 

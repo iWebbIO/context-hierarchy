@@ -127,8 +127,8 @@ describe("DistillateCache", () => {
   it("put is best-effort: an IO failure NEVER throws over a successful run", async () => {
     // A file where the cache DIRECTORY belongs → mkdir fails → put swallows.
     // The cache is an accelerator: a write failure must not corrupt the
-    // outcome of the request that produced the distillate (the final-review
-    // finding this pins — the old put rethrew every non-EEXIST error).
+    // outcome of the request that produced the distillate (the old put
+    // rethrew every non-EEXIST error).
     const { cache, dataDir } = makeCache();
     const { writeFileSync } = await import("node:fs");
     writeFileSync(join(dataDir, "cache"), "not a directory", "utf8");

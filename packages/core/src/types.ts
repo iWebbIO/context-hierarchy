@@ -53,9 +53,9 @@ export interface ChatResult {
   finishReason: string;
   usage?: Usage;
   /**
-   * Set by FleetEngine when this result came from the degraded path (a fleet
-   * failure answered by one truncation-fit direct call) — global constraint
-   * 10. Absent on every other result, including cache replays.
+   * Set by FleetEngine when this result came from the degraded path: a fleet
+   * failure answered by one truncation-fit direct call. Absent on every
+   * other result, including cache replays.
    */
   degraded?: boolean;
 }
@@ -74,8 +74,8 @@ export interface ToolCallDelta {
 /**
  * Events yielded by `ProviderAdapter.stream`, in SSE arrival order. The
  * optional `degraded` field on a finish event is set by FleetEngine when the
- * stream came from the degraded fallback path (global constraint 10's
- * "marked degraded" where no HTTP header can be set anymore).
+ * stream came from the degraded fallback path, where no HTTP header can be
+ * set anymore.
  */
 export type StreamEvent =
   | { type: "delta"; content?: string; toolCallDeltas?: ToolCallDelta[] }

@@ -1,10 +1,9 @@
-// engine-stack — the shared in-process wiring behind `ctxh ask` (brief R3).
-//
-// ProviderAdapter → TokenAccountant → strategy (name → instance) → FleetEngine
-// with the configured cap, plus an onSubCall collector so the CLI can print
-// the `--stats` sub-call summary. The adapter is overridable so tests (and
-// any programmatic caller) can run the real engine over a scripted fake —
-// no network, no build, full stack.
+// engine-stack — the shared in-process wiring behind `ctxh ask`:
+// ProviderAdapter → TokenAccountant → strategy (name → instance) →
+// FleetEngine with the configured cap, plus an onSubCall collector so the
+// CLI can print the `--stats` sub-call summary. The adapter is overridable
+// so tests (and any programmatic caller) can run the real engine over a
+// scripted fake — no network, no build, full stack.
 
 import {
   FleetEngine,

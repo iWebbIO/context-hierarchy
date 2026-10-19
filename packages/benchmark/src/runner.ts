@@ -1,21 +1,12 @@
-// The grid runner (brief R3). For every (task, cap, arm, trial) cell:
-//
-//  - a FRESH per-run dataDir subdirectory — a virgin DistillateCache means
-//    trials of the same cell can never replay each other, and a virgin
-//    TokenAccountant means no calibration drift between trials;
-//  - a fresh ProviderAdapter over the (possibly injected) fetch;
-//  - the arm run, verified, recorded as a RunResult;
-//  - a wall-clock guard (Promise.race with a rejecting timer — brief R3 says
-//    adapter-level AbortController is NOT required) that records
-//    `error: "timeout"` instead of losing the run.
-//
-// The grid executes through a simple bounded pool over the run list
-// (`concurrency` lanes pulling the next job — never Promise.all over the whole
-// grid). The bound is over RUNS: sub-calls inside one run (e.g. fleet workers)
-// may legitimately overlap each other.
-//
-// Honesty rules: failed runs are recorded with their error and count as
-// incorrect; nothing is optimistically retried or dropped.
+// The grid runner: every (task, cap, arm, trial) cell. Each run gets a FRESH
+// per-run dataDir subdirectory — a virgin DistillateCache means trials can
+// never replay each other, and a virgin TokenAccountant means no calibration
+// drift between trials — and a wall-clock guard (Promise.race with a
+// rejecting timer; adapter-level AbortController is not required) records
+// `error: "timeout"` instead of losing the run. The grid executes through a
+// bounded pool over runs (`concurrency` lanes; sub-calls inside one run may
+// legitimately overlap). Failed runs are recorded with their error and count
+// as incorrect; nothing is retried or dropped.
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -38,7 +29,7 @@ export interface UpstreamConfig {
   timeoutMs?: number;
 }
 
-/** One recorded grid cell (brief R3). */
+/** One recorded grid cell. */
 export interface RunResult {
   taskId: string;
   arm: ArmName;
@@ -65,7 +56,7 @@ export interface RunResult {
   error?: string;
 }
 
-/** runGrid parameters (brief R3 signature plus optional extras). */
+/** runGrid parameters. */
 export interface RunGridParams {
   tasks: BenchmarkTask[];
   caps: number[];
@@ -83,12 +74,12 @@ export interface RunGridParams {
   onRunComplete?: (result: RunResult, completed: number, total: number) => void;
 }
 
-/** Per-run wall-clock guard default (brief R3: 600 s). */
+/** Per-run wall-clock guard default: 600 s. */
 export const DEFAULT_TIMEOUT_MS = 600_000;
 
 /** Answers longer than this are truncated in `verifiedAnswer` (marked). */
 const VERIFIED_ANSWER_MAX_CHARS = 2000;
-/** `modelContent` excerpt bound (brief R3). */
+/** `modelContent` excerpt bound. */
 const MODEL_EXCERPT_MAX_CHARS = 300;
 
 /** Sentinel rejection for the wall-clock guard — never user-visible. */

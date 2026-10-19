@@ -1,31 +1,10 @@
-// The benchmark arms (brief R2) — one engine variant per arm, built from ONE
-// config `{ adapter, accountant, model, dataDir, capTokens }`:
-//
-//  - `fleet`          — full FleetEngine with the HierarchyStrategy (planner,
-//                       workers, digest bounding, synthesizer, degradation).
-//  - `map-reduce`     — FleetEngine with `plannerDisabled: true`: deterministic
-//                       fixed slicing instead of the LLM planner (the same
-//                       workers/synthesizer/degradation as fleet).
-//  - `solo-hierarchy` — NO engine: `HierarchyStrategy.fit()` manages the
-//                       context, then ONE direct `adapter.chat` — the
-//                       degenerate fleet-of-one. (The strategy itself may make
-//                       its own single capped condense call inside `fit`; that
-//                       is the strategy's seam, not an arm sub-call.)
-//  - `truncation`     — the same single-call shape with TruncationStrategy —
-//                       the naive drop-oldest baseline.
-//  - `question-only`  — the CONTROL: system messages + the last user message
-//                       ONLY (haystack stripped), one direct call — it
-//                       catches tasks answerable without any context.
-//  - `uncapped`       — the ORIGINAL messages go to one direct call with no
-//                       cap: the reference arm. Its real prompt-token usage is
-//                       recorded; the runner executes it once per task per
-//                       trial, not once per cap.
-//
-// For solo-hierarchy / truncation / question-only / uncapped the single call
-// is wrapped and a synthetic `SubCallEvent { call: "direct",
-// estimatedTokens: accountant.estimate(dispatchedMessages), usage from the
-// result, latencyMs, cacheHit: false }` is recorded, so every arm reports the
-// same sub-call shape.
+// The benchmark arms: one engine variant per arm, built from one config
+// `{ adapter, accountant, model, dataDir, capTokens }` (ARM_DESCRIPTIONS is
+// the per-arm semantics of record). The solo arms — solo-hierarchy,
+// truncation, question-only, uncapped — make one direct adapter call wrapped
+// as a synthetic `SubCallEvent { call: "direct", estimatedTokens, usage,
+// latencyMs, cacheHit: false }`, so every arm reports the same sub-call
+// shape.
 
 import {
   FleetEngine,
@@ -75,7 +54,7 @@ export const ARM_DESCRIPTIONS: Record<ArmName, string> = {
     "reference: the ORIGINAL messages in ONE direct adapter call with no cap (run once per task per trial, not per cap) — what doing nothing to the context costs",
 };
 
-/** The one config every arm is built from (brief R2). */
+/** The one config every arm is built from. */
 export interface ArmConfig {
   adapter: ProviderAdapter;
   accountant: TokenAccountant;
@@ -144,7 +123,7 @@ async function singleCallArm(
   return directCall(fit.messages, cfg);
 }
 
-/** Run one arm over one request (brief R2). */
+/** Run one arm over one request. */
 export async function runArm(
   arm: ArmName,
   messages: ChatMessage[],

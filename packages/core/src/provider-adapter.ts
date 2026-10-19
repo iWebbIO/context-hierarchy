@@ -1,27 +1,10 @@
-// ProviderAdapter — the single funnel through which every model call flows.
-//
-// Wire dialect (OpenAI chat-completions, spoken with quirks by OpenRouter and
-// Ollama):
-//  - POST {baseUrl}/chat/completions with `Authorization: Bearer {apiKey}`.
-//  - chat(): `stream: false`; the response maps to ChatResult (tool_calls
-//    aggregated from `choices[0].message`, finish_reason, usage).
-//  - stream(): `stream: true` + `stream_options: { include_usage: true }`;
-//    SSE parsed line-by-line: `:` comments (keep-alives) are ignored,
-//    `data: [DONE]` ends the stream, `data: {json}` is a chunk. A chunk
-//    carrying `usage` — whatever its `choices` shape: OpenAI sends an empty
-//    array, OpenRouter a non-empty one — attaches that usage to the finish
-//    event, so the finish reason is held back until [DONE]/stream end.
-//    `error` objects surface as `error` events and end the stream: BOTH the
-//    per-choice form and the TOP-LEVEL form (OpenRouter's actual mid-stream
-//    failure shape, which carries no `choices` array at all).
-//  - models(): GET {baseUrl}/models, parsed-JSON passthrough.
-//
-// Retries: 5xx and network/timeout failures only, never 4xx. chat() retries
-// up to 2 times; stream() retries only when the failure happened before any
-// event was yielded. 4xx surfaces as UpstreamError with the upstream status
-// and a best-effort parsed error message. A response `model` that differs
-// from the requested one (OpenRouter fallback renames) is intentionally
-// ignored — ChatResult carries no model field.
+// ProviderAdapter: the funnel through which every model call flows, speaking
+// the OpenAI chat-completions dialect (with the OpenRouter/Ollama quirks
+// noted at the parsing sites below). Entry points: chat() non-streaming,
+// stream() as an event generator, models() as a parsed-JSON listing.
+// Retries cover 5xx and network/timeout failures only, never 4xx (which
+// surfaces as UpstreamError with the upstream status); stream() retries only
+// while nothing has been yielded yet.
 
 import type {
   ChatParams,
@@ -342,8 +325,8 @@ export class ProviderAdapter {
         if (usage !== undefined) pendingUsage = usage;
       }
 
-      // A TOP-LEVEL `error` object (OpenRouter's mid-stream failure form)
-      // carries no `choices` array at all — without this check it would fall
+      // A top-level `error` object (OpenRouter's mid-stream failure form)
+      // carries no `choices` array at all. Without this check it would fall
       // through the `continue` below and the failure would masquerade as a
       // clean stream end. Surface it and stop, exactly like a choice error.
       if (record.error !== undefined && record.error !== null) {
@@ -398,7 +381,7 @@ export class ProviderAdapter {
 
   /**
    * Yield complete lines from the SSE body (newline-split, buffered). When an
-   * external `signal` fires mid-body the reader is CANCELLED (unblocking any
+   * external `signal` fires mid-body the reader is cancelled (unblocking any
    * pending read) and the iteration ends with an AbortError, so a cancelled
    * stream surfaces as a cancellation — never as a clean stream end.
    */

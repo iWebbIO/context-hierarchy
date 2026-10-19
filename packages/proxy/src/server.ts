@@ -1,29 +1,10 @@
-// The OpenAI-compatible HTTP surface (task-6 brief R3).
-//
-// Routes:
-//   POST /v1/chat/completions — non-stream and SSE stream, mapped onto the
-//     engine's run()/stream(). Responses are faithful OpenAI shapes; `usage`
-//     is SYNTHETIC: summed across every sub-call of the request (usage fields
-//     when a sub-call reported them, its estimate otherwise; a passthrough
-//     direct call's single event IS its own usage). A degraded engine result
-//     adds the `x-context-hierarchy-degraded: true` header; a degraded STREAM
-//     (headers already sent) is marked by an SSE comment line
-//     `: x-context-hierarchy-degraded: true` — and both paths carry the
-//     degraded flag on their sub-call telemetry events.
-//   GET  /v1/models — passthrough of `adapter.models()`.
-//
-// Sub-call collection: the engine reports sub-calls through its constructor
-// `onSubCall` hook. `subCallSink(telemetry)` is that hook — telemetry write +
-// a push into the AsyncLocalStorage-scoped collector of the HTTP request the
-// sub-call belongs to. `buildFromConfig` wires the real engine with it; tests
-// wiring their own real engine use it the same way.
-//
-// Errors: upstream `UpstreamError` passes its status through (502 when
-// unknown) with an OpenAI-style body; an `InternalCapViolation` (a request
-// even truncation cannot fit under the cap) is a client-input problem → 400 —
-// the proxy never 5xxs from cap logic. Mid-stream failures become an SSE
-// error line + `[DONE]` (the socket is never left hanging). Telemetry never
-// throws into request handling.
+// The OpenAI-compatible HTTP surface: POST /v1/chat/completions (non-stream
+// and SSE, over the engine's run()/stream()) and GET /v1/models (an
+// `adapter.models()` passthrough). `usage` is synthetic, summed across the
+// request's sub-calls, which AsyncLocalStorage attributes to their HTTP
+// request (see `subCallSink`). Upstream errors keep their status (502 when
+// unknown), un-fittable cap violations are 400s, and mid-stream failures
+// become an SSE error line + `[DONE]`.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -73,8 +54,7 @@ const requestStates = new WeakMap<FastifyRequest, RequestState>();
 const subCallScope = new AsyncLocalStorage<{ events: SubCallEvent[] }>();
 
 /**
- * The engine's `onSubCall` hook, wired by `buildFromConfig` (and by tests
- * building their own real engine): every completed sub-call is logged to
+ * The engine's `onSubCall` hook: every completed sub-call is logged to
  * telemetry and, when the call belongs to an in-flight HTTP request, added
  * to that request's collector for synthetic-usage summing.
  */
@@ -175,10 +155,9 @@ function deltaChoice(event: Extract<StreamEvent, { type: "delta" }>): Record<str
   if (event.toolCallDeltas !== undefined) {
     delta.tool_calls = event.toolCallDeltas.map((d: ToolCallDelta) => {
       const fragment: Record<string, unknown> = { index: d.index };
-      // Wire convention (and what OpenAI clients aggregate on): the fragment
-      // that opens a tool call carries id + type; later fragments carry only
-      // index + argument deltas. The `type` is required — the official SDK
-      // throws "tool call snapshot missing `type`" without it.
+      // Wire convention: the fragment that opens a tool call carries id +
+      // type; later fragments carry only index + argument deltas. The
+      // `type` is required — the official SDK throws without it.
       if (d.id !== undefined) {
         fragment.id = d.id;
         fragment.type = "function";
@@ -211,10 +190,10 @@ function parseMessages(raw: unknown): ChatMessage[] {
       );
     }
     // OpenAI wire convention: an assistant tool-call message carries
-    // `content: null` (and clients echo it back in conversation history).
-    // Core's v1 ChatMessage is string-content, so null is coerced to "" HERE
-    // — a standard tool-calling round-trip must survive its second turn.
-    // Anything else non-string (numbers, objects, missing field) is malformed.
+    // `content: null` (clients echo it back in conversation history), while
+    // core's ChatMessage is string-content — so null is coerced to "" here
+    // and a standard tool-calling round-trip survives its second turn.
+    // Anything else non-string is malformed.
     if (m.content !== null && typeof m.content !== "string") {
       throw new InvalidRequestError("message.content must be a string or null.");
     }
@@ -304,10 +283,6 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
   const app = Fastify({ logger: false });
 
   // ---- Error mapping (OpenAI-style bodies, honest upstream statuses) ----
-  // The parameter is typed as the supertype `Error` (assignable to Fastify's
-  // `FastifyError`-taking handler): under the TS 7 native compiler,
-  // instanceof narrowing does not apply to intersection-typed parameters
-  // (`Error & { statusCode }`), so `statusCode` is read via a safe cast.
   app.setErrorHandler((err: Error, request, reply) => {
     const statusCode = (err as { statusCode?: number }).statusCode;
     if (err instanceof UpstreamError) {
@@ -316,7 +291,7 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
     }
     if (err instanceof InternalCapViolation) {
       // The request cannot fit under the cap even fully truncated — a
-      // property of the REQUEST, not a proxy failure (never a 5xx).
+      // property of the request, not a proxy failure (never a 5xx).
       reply.code(400).send(openAiError(err.message, "invalid_request_error"));
       return;
     }
@@ -401,8 +376,7 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
     }
 
     // Streaming: SSE headers, then a push-driven stream pumped from the
-    // engine's events. All pushes end with [DONE] and stream close — a
-    // mid-stream failure becomes an SSE error line + [DONE], never a hang.
+    // engine's events.
     const id = `chatcmpl-${randomUUID()}`;
     const created = Math.floor(Date.now() / 1000);
     const chunk = (choices: unknown[]): Record<string, unknown> => ({
@@ -422,8 +396,8 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
     // A disconnected streaming client aborts the whole fleet: `close` on the
     // raw socket feeds an AbortController wired into engine.stream, so the
     // engine's in-flight upstream calls are cancelled instead of running on
-    // for a client that is no longer there. Guarded: once the response is
-    // finished (normal end), the close is the expected one — no abort.
+    // for a client that is no longer there. Once the response finished
+    // normally, the close is the expected one — no abort.
     const fleetAbort = new AbortController();
     request.raw.once("close", () => {
       if (!reply.sent || !sse.readableEnded) fleetAbort.abort();
@@ -445,10 +419,10 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
               finishReason = event.finishReason;
               if (event.usage !== undefined) finishUsage = event.usage;
               // A degraded stream is marked on the wire: the HTTP header
-              // cannot be set anymore (SSE headers are already sent), so the
-              // marker rides as an SSE comment line — visible to humans and
-              // debug tooling, ignored by spec-compliant SSE parsers — plus
-              // the degraded flag on the sub-call telemetry event.
+              // can no longer be set (SSE headers are already sent), so the
+              // marker rides as an SSE comment line, ignored by
+              // spec-compliant SSE parsers, plus the degraded flag on the
+              // sub-call telemetry event.
               if (event.degraded) sse.push(": x-context-hierarchy-degraded: true\n\n");
               push(chunk([{ index: 0, delta: {}, finish_reason: event.finishReason || null }]));
             }
@@ -491,10 +465,10 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
 }
 
 /**
- * Convenience wiring (brief R3): construct the real adapter, accountant,
- * strategy, cache-backed engine (telemetry-sunk sub-calls) and server from a
- * resolved `ProxyConfig`. The strategy is `hierarchy` unless configured
- * `truncation`; fleet worker lanes follow `cfg.concurrency`.
+ * Convenience wiring: construct the real adapter, accountant, strategy,
+ * cache-backed engine (telemetry-sunk sub-calls) and server from a resolved
+ * `ProxyConfig`. The strategy is `hierarchy` unless configured `truncation`;
+ * fleet worker lanes follow `cfg.concurrency`.
  */
 export function buildFromConfig(cfg: ProxyConfig): FastifyInstance {
   const adapter = new ProviderAdapter({ baseUrl: cfg.upstreamBaseUrl, apiKey: cfg.upstreamApiKey });

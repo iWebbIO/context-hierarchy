@@ -1,4 +1,4 @@
-// @context-hierarchy/benchmark — the M2 benchmark rig (arms, runner,
+// @context-hierarchy/benchmark — the benchmark rig (arms, runner,
 // verification, report). The CLI entry is src/run.ts
 // (`node packages/benchmark/dist/run.js`), kept out of this index on purpose:
 // importing the library surface must never drag in the entry guard's

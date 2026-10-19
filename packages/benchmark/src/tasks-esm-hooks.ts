@@ -1,21 +1,12 @@
-// A surgical ESM resolve hook for the PLAIN-NODE CLI path (registered by the
-// entry guard in src/run.ts; vitest never runs it — tests resolve through
-// vite's own remapping).
-//
-// WHY: the task suites (tasks/, owned by the tasks track) ship TypeScript
-// SOURCE with `.js`-suffixed internal imports (canonical TS convention).
-// TypeScript and vite remap `./coding.js` → `./coding.ts`; plain Node does
-// NOT, so `node packages/benchmark/dist/run.js` could never consume the
-// suites without a compiled `tasks/index.js` — which the tasks track does not
-// emit (its sources are not in any tsc project).
-//
-// WHAT this hook does — and nothing more: when a `.js` import INSIDE the
-// benchmark tasks directory fails with ERR_MODULE_NOT_FOUND, retry the `.ts`
-// sibling. Everything else passes through untouched. The remapped modules
-// must be erasable-only TypeScript (Node >= 23.6 strips types natively);
-// empirically the suite's runtime import graph (index/coding/synthetic/rng)
-// is, while the non-erasable fixture files (queue.ts, event-emitter.ts) are
-// only ever READ as haystack text, never imported.
+// ESM resolve hook for the plain-Node CLI path (registered by the entry guard
+// in src/run.ts; vitest never runs it — tests resolve through vite's own
+// remapping). The task suites ship TypeScript source with `.js`-suffixed
+// internal imports, which TypeScript and vite remap to the `.ts` siblings but
+// plain Node does not: when a `.js` import inside tasks/ fails with
+// ERR_MODULE_NOT_FOUND, this hook retries the `.ts` sibling and passes
+// everything else through untouched. The remapped modules are erasable-only
+// TypeScript (Node >= 23.6 strips types natively); the non-erasable fixture
+// files are only ever READ as haystack text, never imported.
 
 /** Node's module-customization hooks surface (stable since Node 20.6). */
 interface ResolveContext {

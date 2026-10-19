@@ -1,6 +1,6 @@
-// Config unit tests (task-6 brief R2): env → ProxyConfig with the exact
-// defaults, required-key errors naming the variable, manual `.env` parsing,
-// and override merging. Environment mutation is safe here: vitest isolates
+// Config unit tests: env → ProxyConfig with the exact defaults,
+// required-key errors naming the variable, manual `.env` parsing, and
+// override merging. Environment mutation is safe here: vitest isolates
 // each test file in its own worker.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

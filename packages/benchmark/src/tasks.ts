@@ -1,20 +1,8 @@
-// The single seam through which the rig consumes the benchmark task suites
-// owned by the tasks track (`tasks/index.js`).
-//
-// WHY a runtime dynamic import instead of the pinned static form
-// (`import { TASKS } from "../tasks/index.js"`): tasks/ is owned by a PARALLEL
-// track and does not exist while the rig is being developed. A static import
-// — the correct end-state form once tasks/ has landed — breaks `tsc -p .`,
-// the repo-root typecheck, and (where executed) vitest until that directory
-// exists. The computed specifier below is invisible to the type checker, so
-// the rig typechecks, builds, and tests standalone; every loaded task is then
-// validated at runtime against the pinned format (src/types.ts), so a
-// drifted task suite still fails loudly.
-//
-// The loader tries the compiled `index.js` first, then the TypeScript source
-// `index.ts`: Node >= 23.6 strips erasable TypeScript natively (the pinned
-// task format — interfaces and `import type` — is erasable-only), and vitest
-// resolves either. A runtime error names both attempted locations.
+// The loader for the benchmark task suites. Loads ../tasks/index.js (compiled)
+// first, then ../tasks/index.ts (TypeScript source — Node >= 23.6 strips
+// erasable types natively, and the pinned task format is erasable-only), then
+// validates every task at runtime against the pinned shape (src/types.ts), so
+// a drifted suite fails loudly at load time.
 
 import type { BenchmarkTask } from "./types.js";
 
@@ -26,9 +14,9 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Validate a loaded task list against the pinned format (brief §"Pinned task
- * format"). Throws with a precise, task-locating message on the first
- * violation; returns the same array typed.
+ * Validate a loaded task list against the pinned format. Throws with a
+ * precise, task-locating message on the first violation; returns the same
+ * array typed.
  */
 export function validateTasks(raw: unknown): BenchmarkTask[] {
   if (!Array.isArray(raw)) {
@@ -116,7 +104,7 @@ export async function loadTasks(): Promise<BenchmarkTask[]> {
   if (mod === undefined) {
     throw new Error(
       `cannot load the benchmark task suites: packages/benchmark/tasks/index.{js,ts} not found ` +
-        `(${errorMessage(lastError)}). The tasks track owns that directory.`,
+        `(${errorMessage(lastError)}).`,
     );
   }
   return validateTasks(mod.TASKS);

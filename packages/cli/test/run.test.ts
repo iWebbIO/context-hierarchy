@@ -1,4 +1,4 @@
-// CLI tests (brief R5) — NO network, ever.
+// CLI tests — NO network, ever.
 //
 // The ask paths run the REAL stack (loadConfig → buildEngineStack →
 // FleetEngine → TokenAccountant → strategy) over a scripted FakeAdapter
@@ -85,7 +85,7 @@ function captureIo(): { out: (line: string) => void; err: (line: string) => void
 }
 
 // ---------------------------------------------------------------------------
-// parseArgs (R5d)
+// parseArgs
 // ---------------------------------------------------------------------------
 
 describe("parseArgs", () => {
@@ -160,7 +160,7 @@ describe("parseArgs", () => {
 });
 
 // ---------------------------------------------------------------------------
-// formatConfig — the config mask (R5c)
+// formatConfig — the config mask
 // ---------------------------------------------------------------------------
 
 describe("formatConfig", () => {
@@ -197,7 +197,7 @@ describe("formatConfig", () => {
 });
 
 // ---------------------------------------------------------------------------
-// formatSubCallSummary (R5b) — labels, tokens, latency, flags
+// formatSubCallSummary — labels, tokens, latency, flags
 // ---------------------------------------------------------------------------
 
 describe("formatSubCallSummary", () => {
@@ -227,7 +227,7 @@ describe("formatSubCallSummary", () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildEngineStack (R3)
+// buildEngineStack
 // ---------------------------------------------------------------------------
 
 describe("buildEngineStack", () => {
@@ -275,7 +275,7 @@ describe("buildEngineStack", () => {
 });
 
 // ---------------------------------------------------------------------------
-// runAsk — ask end-to-end through the real stack over a scripted fake (R5a)
+// runAsk — ask end-to-end through the real stack over a scripted fake
 // ---------------------------------------------------------------------------
 
 describe("runAsk", () => {

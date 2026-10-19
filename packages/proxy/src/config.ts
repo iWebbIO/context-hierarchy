@@ -1,7 +1,7 @@
-// Proxy configuration from the environment (task-6 brief R2).
+// Proxy configuration from the environment.
 //
 // Precedence, per key: `loadConfig` overrides > real environment variables >
-// `.env` file (parsed by hand — no dotenv dependency) > defaults.
+// `.env` file (parsed by hand, no dotenv dependency) > defaults.
 //
 // Required keys (no defaults): UPSTREAM_BASE_URL, UPSTREAM_API_KEY,
 // UPSTREAM_MODEL — a missing one throws a startup error naming the variable

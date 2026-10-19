@@ -1,10 +1,7 @@
-// Real-suite dry-run test (brief: "dry-run output of the real task
-// inventory IF tasks/ has landed" — it has). This test consumes the REAL
-// task suites through the shipped loader and asserts the exact pre-flight
-// behavior, including the grid-plan math on the way.
-//
-// Still no network, no .env: --dry-run resolves no configuration and makes no
-// model calls (that is the assertion that matters).
+// Real-suite dry-run test. Consumes the REAL task suites through the shipped
+// loader and asserts the exact pre-flight behavior, including the grid-plan
+// math on the way. No network, no .env: --dry-run resolves no configuration
+// and makes no model calls (that is the assertion that matters).
 
 import { describe, expect, it } from "vitest";
 import { main } from "../src/run.js";

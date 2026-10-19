@@ -1,6 +1,6 @@
-// HierarchyStrategy tests (task-4 brief R4): a scripted FAKE adapter (records
-// calls, returns canned digest text), the REAL TokenAccountant, and throwaway
-// dataDirs under os.tmpdir(). No test here ever touches the network.
+// HierarchyStrategy tests: a scripted FAKE adapter (records calls, returns
+// canned digest text), the REAL TokenAccountant, and throwaway dataDirs under
+// os.tmpdir(). No test here ever touches the network.
 
 import { createHash } from "node:crypto";
 import {
@@ -30,7 +30,7 @@ import type {
   StreamEvent,
 } from "../src/index.js";
 
-// The condense instruction, embedded verbatim in the condense prompt (brief R1).
+// The condense instruction, embedded verbatim in the condense prompt.
 const CONDENSE_INSTRUCTION =
   "You compress a conversation history for a model with a very small context window. Preserve VERBATIM: all code blocks, quoted strings, file paths, identifiers, numbers, URLs, and every decision or commitment made. Output plain text only, no preamble, no meta-commentary. Be dense; omit nothing load-bearing.";
 
@@ -98,7 +98,7 @@ function sha256Hex(s: string): string {
 }
 
 /**
- * Spill completeness (brief R4c): every input message either appears verbatim
+ * Spill completeness: every input message either appears verbatim
  * (identity) in the result or is spilled with a valid pointer whose
  * content-addressed file holds the FULL original and round-trips through
  * `restore`. Also cross-checks the two directions against each other.
@@ -140,7 +140,7 @@ async function expectSpillComplete(
   }
 }
 
-describe("HierarchyStrategy — (a) Stage 1 rules suffice: zero LLM", () => {
+describe("HierarchyStrategy — Stage 1 rules suffice: zero LLM", () => {
   it("passes under-budget input through untouched: same list, no spill, 0 adapter calls", async () => {
     const adapter = forbidden();
     const ctx = makeCtx(adapter);
@@ -207,7 +207,7 @@ describe("HierarchyStrategy — (a) Stage 1 rules suffice: zero LLM", () => {
   });
 });
 
-describe("HierarchyStrategy — (b) Stage 2: exactly one capped condense call", () => {
+describe("HierarchyStrategy — Stage 2: exactly one capped condense call", () => {
   it("condenses the middle once; the call's prompt fits the cap; system/tail verbatim; digest markers", async () => {
     const adapter = new ScriptedAdapter(() => DIGEST);
     const ctx = makeCtx(adapter);
@@ -257,7 +257,7 @@ describe("HierarchyStrategy — (b) Stage 2: exactly one capped condense call", 
     expect(call.messages).not.toContain(sys);
     for (const t of [t1, t2, t3, t4]) expect(call.messages).not.toContain(t);
 
-    // R3: the condense prompt fit the cap pre-dispatch.
+    // The condense prompt fit the cap pre-dispatch.
     expect(ctx.accountant.estimate(call.messages, ctx.model)).toBeLessThanOrEqual(budget);
 
     // Stage 3 composition: system verbatim, digest wrapped in markers, tail verbatim.
@@ -361,7 +361,7 @@ describe("HierarchyStrategy — (b) Stage 2: exactly one capped condense call", 
   });
 });
 
-describe("HierarchyStrategy — (c) spill completeness, content addressing, restore", () => {
+describe("HierarchyStrategy — spill completeness, content addressing, restore", () => {
   it("spills an elided TAIL tool result (reason elided) whose file round-trips through restore", async () => {
     const adapter = forbidden(); // rules must suffice here
     const ctx = makeCtx(adapter);
@@ -439,7 +439,7 @@ describe("HierarchyStrategy — (c) spill completeness, content addressing, rest
   });
 });
 
-describe("HierarchyStrategy — (d) restore on a bad pointer throws (never garbage)", () => {
+describe("HierarchyStrategy — restore on a bad pointer throws (never garbage)", () => {
   it("throws SpillRestoreError on malformed or never-written pointers", async () => {
     const ctx = makeCtx(new ScriptedAdapter(() => "x"));
     await expect(strategy.restore("deadbeef.json", ctx)).rejects.toThrow(SpillRestoreError);
@@ -475,7 +475,7 @@ describe("HierarchyStrategy — (d) restore on a bad pointer throws (never garba
   });
 });
 
-describe("HierarchyStrategy — (e) blank-line collapse", () => {
+describe("HierarchyStrategy — blank-line collapse", () => {
   it("collapses runs of 3+ blank lines to a single blank line; 1–2 blank lines untouched", async () => {
     const adapter = forbidden(); // rules must suffice
     const ctx = makeCtx(adapter);
@@ -511,7 +511,7 @@ describe("HierarchyStrategy — (e) blank-line collapse", () => {
   });
 });
 
-describe("HierarchyStrategy — (f) system-only overflow resolves (digest of nothing)", () => {
+describe("HierarchyStrategy — system-only overflow resolves (digest of nothing)", () => {
   it("all-system input: no condense call, systems middle-cut by the hard-fit, cap intact", async () => {
     const adapter = forbidden(); // empty middle → nothing to condense
     const ctx = makeCtx(adapter);

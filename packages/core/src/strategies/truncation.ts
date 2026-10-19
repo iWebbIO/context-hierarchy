@@ -1,32 +1,12 @@
-// TruncationStrategy — the always-works baseline (and benchmark baseline).
+// TruncationStrategy: the always-works baseline (and benchmark baseline).
 // Fully deterministic: no adapter calls, no network, no disk of its own; the
-// only dependency is the accountant's estimates. Rules (task-3 brief as
-// amended by the 2026-10-19 ruling — the fit invariant wins):
-//   - ALL `system` messages are kept verbatim whenever the budget allows;
-//     they are cut LAST — never dropped, middle-cut only as the final resort.
-//   - The LAST `user` message is never dropped.
-//   - The remaining budget is filled tail-first from the end of the list.
-//   - When over budget even with everything else dropped: middle-cut the
-//     last user message — verbatim head + tail slices sized to the budget
-//     with one marker line `[... context-hierarchy: elided ~N tokens ...]`
-//     in place of the removed middle (N = estimated removed tokens). The
-//     spill entry ("middle-cut") carries the FULL original message.
-//   - FINAL resort — when the verbatim system block cannot fit alongside the
-//     last-user floor (every droppable already dropped, the last user
-//     already at its floor): middle-cut system messages too — largest
-//     first, the same head+tail + marker + full-original-in-spill treatment
-//     (`reason: "middle-cut"`), allocating what fits between the system cuts
-//     and the last-user floor. If even the marker-only floors cannot fit,
-//     allocations degenerate to empty-content shells (still never dropped,
-//     originals still spilled with the same reason).
-//   - For any budget >= 64 tokens the fit MUST succeed for every input
-//     class; a strategy-level throw for oversized input is a spec bug. The
-//     single mathematically unsatisfiable input — so many never-droppable
-//     messages (systems + last user) that even their empty shells exceed
-//     the budget (>= 14 of them at 64 tokens) — is all that can still trip
-//     the post-fit bug-detector invariant.
-// Result shape: system messages keep their relative order at the head, kept
-// droppables follow in original order, the last user message is placed last.
+// only dependency is the accountant's estimates. System messages and the
+// last user message are never dropped, only middle-cut (verbatim head and
+// tail around one marker line, whose exact form is contract; the spill entry
+// carries the full original). When nothing else fits, system messages are
+// middle-cut as the last resort so fit() always succeeds for budgets >= 64
+// tokens. The single unsatisfiable input: more never-droppable messages than
+// even their empty shells can fit (>= 14 of them at 64 tokens).
 
 import { countTokens } from "../token-count.js";
 import type { ContextStrategy, FitResult, SpilledMessage, StrategyCtx } from "../strategy.js";
@@ -48,11 +28,11 @@ function markerLine(removedTokens: number): string {
  * line in place of the removed middle. All other message fields are kept.
  *
  * Deterministic: an initial proportional sizing is verified with the
- * accountant and shrunk until it fits. The head-count in the marker is
- * reserved at its worst case (the full message's estimate, the most digits it
- * can ever show), so the fit found by the sizing loop can never be invalidated
- * by the marker text itself; shrinking always terminates because each pass
- * reduces the slices and the all-marker floor is exactly the reserve.
+ * accountant and shrunk until it fits. The marker's token count is reserved
+ * at its worst case (the full message's estimate, the most digits it can
+ * ever show), so the fit found by the sizing loop can never be invalidated
+ * by the marker text itself, and shrinking always terminates (each pass
+ * reduces the slices; the all-marker floor is exactly the reserve).
  *
  * Callers must pass `availTokens >= cutFloorOf(message)`; the entry invariant
  * below is a bug detector for a misrouted allocation, not an input check.
@@ -127,9 +107,10 @@ type SystemItem = { idx: number; est: number; cutFloor: number; shell: number };
 /**
  * The always-works truncation baseline: drop-oldest-first with all system
  * messages and the last user message preserved, middle-cutting that user
- * message and — as the final resort — the system messages themselves (largest
- * first). `fit` is async per the seam even though every step inside is
- * synchronous.
+ * message and, as the final resort, the system messages themselves (largest
+ * first). Result shape: systems keep their relative order at the head, kept
+ * droppables follow in original order, the last user message is placed last.
+ * `fit` is async per the seam even though every step inside is synchronous.
  */
 export class TruncationStrategy implements ContextStrategy {
   readonly name = "truncation";
@@ -181,8 +162,8 @@ export class TruncationStrategy implements ContextStrategy {
       keptFrom--;
     }
 
-    // FINAL resort: the verbatim system block cannot fit alongside the
-    // last-user floor (with every droppable already dropped) — middle-cut
+    // Final resort: the verbatim system block cannot fit alongside the
+    // last-user floor (with every droppable already dropped), so middle-cut
     // system messages too, largest first, never dropping any.
     const cutFloorUser = lastUser ? cutFloorOf(lastUser, ctx) : 0;
     const userFloor = lastUser ? Math.min(estLastUser, cutFloorUser) : 0;
@@ -198,8 +179,8 @@ export class TruncationStrategy implements ContextStrategy {
       let systemAvail = budgetTokens - userReserve;
 
       // 2. System base forms: verbatim when cheaper, else the marker-cut
-      //    floor. If the floors cannot fit, degenerate systems to shells —
-      //    and the last user to its shell only if the system shells cannot.
+      //    floor. If the floors cannot fit, degenerate systems to shells, and
+      //    the last user to its shell only if the system shells cannot.
       const systems: SystemItem[] = systemIdx.map((i) => {
         const m = messages[i];
         const est = estOf(m);
@@ -217,8 +198,8 @@ export class TruncationStrategy implements ContextStrategy {
       }
 
       // 3. Base allocations, then grow largest-first with the slack. Growth
-      //    off a shell is a discrete ladder — shell → (cut floor | verbatim),
-      //    never a headless markerless in-between — so every grown allocation
+      //    off a shell is a discrete ladder, shell to (cut floor | verbatim),
+      //    never a headless markerless in-between, so every grown allocation
       //    is middleCut-able or verbatim.
       const alloc = systems.map((s) => (escalated ? s.shell : Math.min(s.est, s.cutFloor)));
       let slack = Math.max(0, systemAvail - alloc.reduce((a, b) => a + b, 0));
@@ -241,7 +222,7 @@ export class TruncationStrategy implements ContextStrategy {
       }
 
       // 4. Build the systems in original order: verbatim | shell | middle-cut.
-      //    Everything not verbatim is spilled with its FULL original.
+      //    Everything not verbatim is spilled with the full original.
       const result: ChatMessage[] = [];
       for (let k = 0; k < systems.length; k++) {
         const s = systems[k];

@@ -1,7 +1,6 @@
-// FleetEngine tests (task-5 brief R3) — scripted recording fakes, a REAL
-// TokenAccountant, the deterministic TruncationStrategy, and temp dataDirs.
-// Nothing here touches the network: the fake adapter records every call and
-// answers from a script.
+// FleetEngine tests — scripted recording fakes, a REAL TokenAccountant, the
+// deterministic TruncationStrategy, and temp dataDirs. Nothing here touches
+// the network: the fake adapter records every call and answers from a script.
 //
 // Call classification (the adapter only sees params; roles are inferred from
 // the shapes the engine builds):
@@ -27,8 +26,9 @@ import type {
 
 const MODEL = "fleet-test-model";
 
-// The worker instruction, VERBATIM from the task-5 brief — matching on the
-// exact string both classifies calls and pins the text the engine must send.
+// The worker instruction, VERBATIM from the engine (fleet-engine.ts) —
+// matching on the exact string both classifies calls and pins the text the
+// engine must send.
 const WORKER_INSTRUCTION =
   "Compress your assigned slice into a dense digest. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.";
 
@@ -183,7 +183,7 @@ function rolesOf(adapter: FakeAdapter): CallRole[] {
 }
 
 describe("FleetEngine.run", () => {
-  it("(a) passthrough: a fitting request makes exactly one direct call", async () => {
+  it("a fitting request makes exactly one direct call", async () => {
     const directResult: ChatResult = {
       content: "direct answer",
       finishReason: "stop",
@@ -219,7 +219,7 @@ describe("FleetEngine.run", () => {
     expect(existsSync(join(dataDir, "cache"))).toBe(false);
   });
 
-  it("(b) the cap invariant: EVERY dispatched call estimates ≤ cap and the response is valid", async () => {
+  it("the cap invariant holds on every dispatched call and the response is valid", async () => {
     const fake = new FakeAdapter(
       // Fenced JSON on purpose — the planner parser tolerates the ```json fence.
       fleetScript({ plannerContent: "```json\n" + HAPPY_PLAN + "\n```" }),
@@ -248,7 +248,7 @@ describe("FleetEngine.run", () => {
     }
   });
 
-  it("(b-shapes) planner/worker/synthesizer prompts match the contract", async () => {
+  it("planner/worker/synthesizer prompts match the contract", async () => {
     const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
     const messages = conversation(8, 100);
     const { engine } = makeHarness({ adapter: fake, capTokens: CAP });
@@ -294,7 +294,7 @@ describe("FleetEngine.run", () => {
     expect(synth.messages[2]).toEqual(messages[9]);
   });
 
-  it("(b-bound) over-budget digests are REDUCED — the synthesizer always receives the digest block", async () => {
+  it("over-budget digests are reduced, never dropped — the synthesizer always receives the digest block", async () => {
     // Regression guard for the live failure this stage exists for: fat worker
     // digests whose joined block overflows the synthesizer budget used to be
     // dropped WHOLE by the generic strategy fit, and the synthesizer answered
@@ -312,8 +312,8 @@ describe("FleetEngine.run", () => {
         // Each digest is FAT (~150+ tokens fresh, still oversized for a
         // calibrated-down accountant): four joined overflow the synthesizer's
         // digest budget under any calibration, but PAIRS fit a reducer's
-        // room — the reduce path. (Test (h-cal) shows calibration moves the
-        // factor below 1.0 during a run; sizes are chosen to survive that.)
+        // room — the reduce path. (The calibration test shows the factor
+        // moves below 1.0 during a run; sizes are chosen to survive that.)
         digestOf: (p) => `digest-${p.messages[0].content.slice(0, 8)}: ${text(120)}`,
       }),
       () => [],
@@ -359,7 +359,7 @@ describe("FleetEngine.run", () => {
     expect(events.map((e) => e.call)).toContain("reducer");
   });
 
-  it("(b-bound') digests too fat to reduce are middle-cut as text — the block is NEVER dropped", async () => {
+  it("digests too fat to reduce are middle-cut as text — the block is never dropped", async () => {
     // Two digests so fat that even one alone exceeds a reducer's room: the
     // last resort is a text middle-cut of the joined block (verbatim head +
     // marker + verbatim tail). The synthesizer still receives a [digest 1]
@@ -392,7 +392,7 @@ describe("FleetEngine.run", () => {
     expect(accountant.estimate(synth.messages, MODEL)).toBeLessThanOrEqual(cap);
   });
 
-  it("(c) planner garbage → fixed map-reduce fallback still completes", async () => {
+  it("planner garbage falls back to the fixed map-reduce fallback and still completes", async () => {
     const fake = new FakeAdapter(
       fleetScript({ plannerContent: "I cannot help with planning, sorry." }),
       () => [],
@@ -423,11 +423,11 @@ describe("FleetEngine.run", () => {
     }
   });
 
-  it("(c-error) an adapter ERROR on the planner call also takes the map-reduce fallback (no degradation)", async () => {
-    // R2: "On ANY planner failure (error, unparseable, empty) → fixed map-reduce
-    // fallback" — a thrown planner call is no exception. Only the planner
+  it("an adapter error on the planner call also takes the map-reduce fallback (no degradation)", async () => {
+    // On ANY planner failure (error, unparseable, empty) the fixed map-reduce
+    // fallback runs — a thrown planner call is no exception. Only the planner
     // role fails here; the fleet must still complete, undegraded. (A fake that
-    // fails the whole fleet path is case (g) below.)
+    // fails the whole fleet path is the degradation test below.)
     // The failure is LOGGED, never silent — assert the log line, keep the
     // output pristine.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -505,7 +505,7 @@ describe("FleetEngine.run", () => {
     );
   });
 
-  it("(d) cache: an identical oversized request replays with ZERO fleet dispatches", async () => {
+  it("an identical oversized request replays from the cache with zero fleet dispatches", async () => {
     const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
     const messages = conversation(8, 100);
     const { engine, events, dataDir, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
@@ -545,7 +545,7 @@ describe("FleetEngine.run", () => {
     expect(fake.calls.length).toBe(callsAfterFirst + 4);
   });
 
-  it("(d-tools) identical messages but different tools do NOT share a cache entry", async () => {
+  it("identical messages but different tools do not share a cache entry", async () => {
     // The key covers tools (and temperature/max_tokens): a request that would
     // get a different answer must never replay the other's distillate.
     const tools = [{ type: "function", function: { name: "get_weather", parameters: {} } }];
@@ -575,7 +575,7 @@ describe("FleetEngine.run", () => {
     expect(files.length).toBe(2);
   });
 
-  it("(f) a worker slice that overflows the cap is strategy-fitted, never a nested fleet", async () => {
+  it("a worker slice that overflows the cap is strategy-fitted, never a nested fleet", async () => {
     // The planner assigns the ENTIRE middle to one worker → the slice alone
     // overflows the cap → the dispatch funnel must fit it before dispatch.
     const oneBigSlice = JSON.stringify([{ start: 1, end: 8, budgetTokens: 500 }]);
@@ -604,7 +604,7 @@ describe("FleetEngine.run", () => {
     }
   });
 
-  it("(synth-params) the synthesizer dispatch carries the user's tools, tool_choice, temperature, max_tokens", async () => {
+  it("the synthesizer dispatch carries the user's tools, tool_choice, temperature, max_tokens", async () => {
     const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
     const messages = conversation(8, 100);
     const { engine } = makeHarness({ adapter: fake, capTokens: CAP });
@@ -631,7 +631,7 @@ describe("FleetEngine.run", () => {
     expect(worker.max_tokens).toBe(200);
   });
 
-  it("(g) degradation: fleet-role failures → one direct call, result marked degraded", async () => {
+  it("fleet-role failures degrade to one direct call with the result marked degraded", async () => {
     // The fake throws for every fleet role (the planner failure alone would
     // trigger the map-reduce fallback, so the workers fail too — that is the
     // fleet failure degradation exists for) and answers direct calls.
@@ -684,7 +684,7 @@ describe("FleetEngine.run", () => {
     expect(events[0].degradedReason!.length).toBeLessThanOrEqual(200);
   });
 
-  it("(signal) an engine-level signal reaches EVERY adapter dispatch (direct through synthesizer)", async () => {
+  it("an engine-level signal reaches every adapter dispatch (direct through synthesizer)", async () => {
     // The fake records the signal each call carried; the engine must thread
     // the caller's signal to planner, workers and synthesizer alike.
     const seenSignals: (AbortSignal | undefined)[] = [];
@@ -709,7 +709,7 @@ describe("FleetEngine.run", () => {
     }
   });
 
-  it("(h) onSubCall events carry the correct call labels and fields", async () => {
+  it("onSubCall events carry the correct call labels and fields", async () => {
     const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
     const messages = conversation(8, 100);
     const { engine, events, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
@@ -735,7 +735,7 @@ describe("FleetEngine.run", () => {
     expect(events[3].completionTokens).toBe(12);
   });
 
-  it("(h-cal) calibration: dispatches with reported usage fold into the accountant's EMA (constraint 8)", async () => {
+  it("usage from dispatches folds into the per-model calibration EMA", async () => {
     // A usage-bearing fleet run must move the persisted calibration factor
     // off 1.0: the fake reports promptTokens far below the funnel's estimate
     // (100 actual vs several hundred estimated), so the factor must fall.
@@ -764,7 +764,7 @@ describe("FleetEngine.run", () => {
     });
   });
 
-  it("(h-cal') a passthrough dispatch with NO reported usage observes nothing (factor stays 1.0)", async () => {
+  it("a passthrough dispatch with no reported usage observes nothing (factor stays 1.0)", async () => {
     const directResult: ChatResult = { content: "answer", finishReason: "stop" }; // no usage
     const fake = new FakeAdapter(
       () => directResult,
@@ -777,10 +777,10 @@ describe("FleetEngine.run", () => {
     expect(accountant.factorFor(MODEL)).toBe(1.0); // nothing to observe
   });
 
-  it("(spill) every engine-initiated fit lands a durable, restorable spill record (constraint 6)", async () => {
+  it("every engine-initiated fit lands a durable, restorable spill record", async () => {
     // The diskless TruncationStrategy removes messages itself; the engine must
-    // still record them. The worker-funnel fit (test (f)'s one-big-slice
-    // scenario) and the degraded fit both fire here.
+    // still record them. The worker-funnel fit (the one-big-slice scenario)
+    // and the degraded fit both fire here.
     const oneBigSlice = JSON.stringify([{ start: 1, end: 8, budgetTokens: 500 }]);
     const fake = new FakeAdapter(fleetScript({ plannerContent: oneBigSlice }), () => []);
     const messages = conversation(8, 100);
@@ -818,7 +818,7 @@ describe("FleetEngine.run", () => {
     }
   });
 
-  it("(spill') a degraded fit also lands a durable spill record", async () => {
+  it("a degraded fit also lands a durable spill record", async () => {
     const fake = new FakeAdapter(
       (params) => {
         if (callRole(params) !== "direct") throw new Error("fleet fails (scripted)");
@@ -840,7 +840,7 @@ describe("FleetEngine.run", () => {
     expect(files.length).toBeGreaterThan(0); // the degraded fit recorded its removals
   });
 
-  it("(cache-io) a cache-write failure after a successful fleet run never corrupts the outcome", async () => {
+  it("a cache-write failure after a successful fleet run never corrupts the outcome", async () => {
     // The put fails on EVERY write (EACCES via a file-where-the-directory-belongs)
     // — the fleet result must still come back intact, undegraded, with no
     // second (degraded) dispatch.
@@ -863,7 +863,7 @@ describe("FleetEngine.run", () => {
 });
 
 describe("FleetEngine.stream", () => {
-  it("(e) an oversized stream yields delta events then finish; the replay chunks ~20 tokens", async () => {
+  it("an oversized stream yields delta events then finish; the replay chunks ~20 tokens", async () => {
     const streamContent = text(60); // well above one 20-token replay chunk
     const synthStream: StreamEvent[] = [
       { type: "delta", content: streamContent.slice(0, 20) },
@@ -962,10 +962,10 @@ describe("FleetEngine.stream", () => {
     ]);
   });
 
-  it("(g-stream) stream degradation before the first yield: events marked degraded, telemetry flagged", async () => {
+  it("stream degradation before the first yield marks events degraded and flags telemetry", async () => {
     // The fleet fails before anything was yielded → the stream degrades to one
-    // direct stream (constraint 10), and the degradation is MARKED: the finish
-    // event carries `degraded: true` and the sub-call event is flagged.
+    // direct stream, and the degradation is MARKED: the finish event carries
+    // `degraded: true` and the sub-call event is flagged.
     vi.spyOn(console, "error").mockImplementation(() => {}); // the planner failure logs
     const degradedStream: StreamEvent[] = [
       { type: "delta", content: "degraded " },
@@ -1004,9 +1004,9 @@ describe("FleetEngine.stream", () => {
     expect(directCalls.length).toBe(1);
     expect(accountant.estimate(directCalls[0].messages, MODEL)).toBeLessThanOrEqual(CAP);
 
-    // The sub-call telemetry event carries the degraded flag (constraint 10)
-    // and the failure's message as degradedReason (here: the planner-path
-    // chat failure that sank the fleet before anything streamed).
+    // The sub-call telemetry event carries the degraded flag and the
+    // failure's message as degradedReason (here: the planner-path chat
+    // failure that sank the fleet before anything streamed).
     const degradedEvents = events.filter((e) => e.degraded === true);
     expect(degradedEvents.length).toBe(1);
     expect(degradedEvents[0].call).toBe("direct");
@@ -1014,7 +1014,7 @@ describe("FleetEngine.stream", () => {
     expect(degradedEvents[0].degradedReason).toContain("fleet fails before first yield (scripted)");
   });
 
-  it("(g-stream') a degraded stream that ends without a finish gets a synthesized degraded finish", async () => {
+  it("a degraded stream that ends without a finish gets a synthesized degraded finish", async () => {
     // The upstream cut the connection (no finish event) — the degraded marker
     // must not be silently lost; a synthetic degraded finish is appended.
     vi.spyOn(console, "error").mockImplementation(() => {}); // the planner failure logs
@@ -1042,7 +1042,7 @@ describe("FleetEngine.stream", () => {
     expect(events.filter((e) => e.degraded === true).length).toBe(1);
   });
 
-  it("(g-stream'') a mid-stream failure AFTER events were yielded surfaces honestly, never a duplicated degrade", async () => {
+  it("a mid-stream failure after events were yielded surfaces honestly, never a duplicated degrade", async () => {
     // The synthesizer yields a delta, THEN fails — degrading now would
     // duplicate output, so the error surfaces instead (pinned behavior).
     const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => {
@@ -1079,7 +1079,7 @@ describe("FleetEngine.stream", () => {
     expect(collected).toEqual([{ type: "delta", content: "partial " }]); // no duplicated output
   });
 
-  it("(cache-io') a cache-write failure after a streamed fleet answer never turns success into an error", async () => {
+  it("a cache-write failure after a streamed fleet answer never turns success into an error", async () => {
     const streamContent = text(60);
     const synthStream: StreamEvent[] = [
       { type: "delta", content: streamContent },

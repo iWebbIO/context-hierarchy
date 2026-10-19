@@ -1,10 +1,10 @@
-// Proxy entry point (task-6 brief R4).
+// Proxy entry point.
 //
 // `startProxy(cfg?)` — the programmatic surface: load/merge config, wire the
-// real stack, listen (port 0 = ephemeral), resolve the actual URL. The CLI
-// path (running `node dist/main.js`) logs exactly ONE startup line: port +
+// real stack, listen (port 0 = ephemeral), resolve the actual URL. When run
+// as the process entry, the CLI path logs exactly one startup line (port +
 // upstream host — never the API key, never the full upstream URL with
-// credentials. A config error exits with the message naming the variable.
+// credentials); a config error exits 1 with the message naming the variable.
 
 import { pathToFileURL } from "node:url";
 import { hostOf } from "@context-hierarchy/core";

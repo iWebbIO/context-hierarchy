@@ -1,6 +1,6 @@
-// M2 Track A — coding-comprehension suite (6 tasks over ONE embedded
-// mini-repo fixture: tasks/fixture-repo, a realistic 10-file utility
-// project with two intentional warts documented only in the notes below).
+// Coding-comprehension suite (6 tasks over ONE embedded mini-repo fixture:
+// tasks/fixture-repo, a realistic 10-file utility project with two
+// intentional warts documented only in the notes below).
 //
 // Ground truths are derived from the fixture itself, never hand-typed:
 //   needle  #1 — the file exporting the asked function is found by scanning

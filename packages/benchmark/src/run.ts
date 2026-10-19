@@ -1,16 +1,15 @@
-// The benchmark CLI entry (brief R6): parse flags, load the task suites,
-// dry-run or run the grid, write the report.
+// The benchmark CLI entry: parse flags, load the task suites, dry-run or run
+// the grid, write the report.
 //
 //   node packages/benchmark/dist/run.js --dry-run
 //   node packages/benchmark/dist/run.js --caps 2000,4000 --arms fleet,uncapped
 //
-// Configuration is read the SAME way the proxy reads it — `loadConfig` from
+// Configuration is read the same way the proxy reads it — `loadConfig` from
 // `@context-hierarchy/proxy` (`.env` with UPSTREAM_BASE_URL / UPSTREAM_API_KEY
-// / UPSTREAM_MODEL, or the real environment). It is resolved ONLY on the live
-// path; `--dry-run` reads no configuration at all (that is also what lets the
-// vitest suite exercise the dry-run path without ever touching `.env`). The
-// API key is forwarded to the adapter and NEVER printed or logged: reports and
-// progress lines carry the host and model name only.
+// / UPSTREAM_MODEL, or the real environment), resolved ONLY on the live path;
+// `--dry-run` reads no configuration at all. The API key is forwarded to the
+// adapter and NEVER printed or logged: reports and progress lines carry the
+// host and model name only.
 
 import { pathToFileURL } from "node:url";
 import { hostOf } from "@context-hierarchy/core";
@@ -24,7 +23,7 @@ import { summaryTable, writeReport } from "./report.js";
 import { loadTasks } from "./tasks.js";
 import type { BenchmarkTask } from "./types.js";
 
-/** Parsed CLI flags (defaults per the brief). */
+/** Parsed CLI flags (defaults documented in the usage text). */
 export interface CliOptions {
   caps: number[];
   arms: ArmName[];

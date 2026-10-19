@@ -1,4 +1,4 @@
-// M2 Track A — task suite entry point.
+// Task suite entry point.
 //
 // PINNED EXPORT: `TASKS` is the single array the benchmark rig consumes.
 // `buildSuite()` and `GROUNDINGS` exist so the suite integrity test can

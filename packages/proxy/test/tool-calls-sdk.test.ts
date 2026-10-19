@@ -1,14 +1,15 @@
-// Deterministic scripted-fake unit test (task-7 brief R3, tool_calls bullet):
-// the tool_calls chunking path end-to-end through the REAL proxy — fake
-// adapter → real FleetEngine → buildServer SSE — unwrapped by the REAL
-// OpenAI SDK client. The SDK is driven through a fake `fetch` backed by
-// fastify.inject, so plain `npm test` opens no socket and touches no network.
+// Deterministic scripted-fake unit test: the tool_calls chunking path
+// end-to-end through the REAL proxy — fake adapter → real FleetEngine →
+// buildServer SSE — unwrapped by the REAL OpenAI SDK client. The SDK is
+// driven through a fake `fetch` backed by fastify.inject, so plain
+// `npm test` opens no socket and touches no network.
 //
 // The SDK's ChatCompletionStream aggregates our re-chunked tool-call deltas
 // (index / id / name / arguments fragments) back into the complete wire
 // message — the proxy-SSE → SDK-shape round trip this test pins. The raw-SSE
 // fragment shapes of the same scenario are already asserted in
-// server.test.ts (d); this file adds the client-side unwrap on top.
+// server.test.ts's tool-call deltas test; this file adds the client-side
+// unwrap on top.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

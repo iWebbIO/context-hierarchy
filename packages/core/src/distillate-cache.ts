@@ -1,16 +1,10 @@
-// DistillateCache — content-addressed persistence for fleet results.
-//
+// DistillateCache: content-addressed persistence for fleet results.
 // A "distillate" is what one full fleet run produced for one exact request:
-// the per-worker digests plus the synthesizer's final result. The cache lets
-// a repeated identical request replay that result with ZERO model calls.
-//
-// Entries are JSON files under `${dataDir}/cache/<key>.json`, written ONCE
-// (open-exclusive "wx"); an existing file is never rewritten — append-only,
-// like the rest of the persistence in this repo. A missing or corrupt file
-// reads as a miss (null); the cache is best-effort and NEVER throws — not on
-// read, and not on write: a failed put must never corrupt the request it was
-// trying to accelerate (turn an already-delivered answer into an error, or a
-// successful fleet run into a degraded re-dispatch).
+// the per-worker digests plus the synthesizer's final result. Entries are
+// JSON files under `${dataDir}/cache/<key>.json`, written once (append-only,
+// never rewritten). The cache is best-effort and never throws, not on read
+// and not on write: a failed put must never corrupt the request it was
+// trying to accelerate.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -60,12 +54,12 @@ export class DistillateCache {
    * different toolset or sampling config is a different request even over
    * identical messages. `model` names the tokenizer the estimate assumed.
    *
-   * Documented limitation: the key covers the EXACT request — retries of the
-   * same request replay the same distillate, and so does any byte-identical
-   * repeat. There is no incremental cross-turn reuse here: a conversation
-   * with one new message is a different key and re-fleets from scratch.
-   * Incremental reuse comes from the strategies' own content addressing
-   * (the hierarchy spill store), not from this cache.
+   * Documented limitation: the key covers the exact request only. Retries
+   * of the same request replay the same distillate, and so does any
+   * byte-identical repeat. There is no incremental cross-turn reuse here: a
+   * conversation with one new message is a different key and re-fleets from
+   * scratch. Incremental reuse comes from the strategies' own content
+   * addressing (the hierarchy spill store), not from this cache.
    */
   keyFor(
     messages: ChatMessage[],
@@ -128,12 +122,13 @@ export class DistillateCache {
 
   /**
    * Persist a distillate, best-effort. The file is created with
-   * open-exclusive semantics: if it already exists the write is skipped —
-   * files are written once and never rewritten (append-only). A same-key
-   * race resolves benignly (both writers hold the same content). ANY other
-   * failure is swallowed: the cache is an accelerator, and a persistence
-   * failure must never change the outcome of the request that produced the
-   * distillate — the caller already holds the fleet result either way.
+   * open-exclusive semantics: if it already exists the write is skipped;
+   * files are written once and never rewritten (append-only), and a
+   * same-key race resolves benignly (both writers hold the same content).
+   * Any other failure is swallowed: the cache is an accelerator, and a
+   * persistence failure must never change the outcome of the request that
+   * produced the distillate; the caller already holds the fleet result
+   * either way.
    */
   async put(key: string, distillate: Distillate): Promise<void> {
     try {

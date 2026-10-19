@@ -1,10 +1,8 @@
-// M2 Track A — task suite integrity test.
-//
-// Verifies the generator output WITHOUT trusting it: ground truths are
-// re-derived here from the haystacks and the fixture on disk (regex recounts,
-// re-executed fixture calls), determinism is proven by a fresh buildSuite()
-// call, and contamination is checked with a blocklist over the serialized
-// tasks. No network, no clock, no randomness — plain `npm test` safe.
+// Task-suite integrity test. Verifies the generator output without trusting
+// it: ground truths are re-derived here from the haystacks and the fixture on
+// disk (regex recounts, re-executed fixture calls), determinism is proven by
+// a fresh buildSuite() call, and contamination is checked with a blocklist
+// over the serialized tasks. No network, no clock, no randomness.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -39,7 +37,7 @@ function occurrences(haystack: string, code: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// R4a — inventory and pinned shape.
+// Inventory and pinned shape.
 // ---------------------------------------------------------------------------
 
 describe("task suite inventory and shape", () => {
@@ -103,8 +101,8 @@ describe("task suite inventory and shape", () => {
 });
 
 // ---------------------------------------------------------------------------
-// R4b — synthetic grounding: planted facts exist verbatim, exactly once,
-// and the verify answers are re-derived from the haystack text itself.
+// Synthetic grounding: planted facts exist verbatim, exactly once, and the
+// verify answers are re-derived from the haystack text itself.
 // ---------------------------------------------------------------------------
 
 describe("synthetic needle tasks", () => {
@@ -219,7 +217,7 @@ describe("synthetic count-aggregate tasks", () => {
 });
 
 // ---------------------------------------------------------------------------
-// R4c — coding tasks: answers re-derived from the fixture on disk and by
+// Coding tasks: answers re-derived from the fixture on disk and by
 // re-executing the real fixture functions.
 // ---------------------------------------------------------------------------
 
@@ -301,7 +299,7 @@ describe("coding comprehension tasks", () => {
 });
 
 // ---------------------------------------------------------------------------
-// R4d — determinism and contamination.
+// Determinism and contamination.
 // ---------------------------------------------------------------------------
 
 describe("determinism and contamination", () => {

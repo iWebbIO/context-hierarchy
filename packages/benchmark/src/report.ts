@@ -1,22 +1,11 @@
-// The report layer (brief R5), all pure except writeReport:
-//
-//  - `summaryTable()`  — a markdown grid: rows are task ids, columns are
-//    arm×cap combos, cells are ✓/✗ per trial (concatenated when trials > 1)
-//    or `-` when the combo has no runs, with a per-column accuracy footer.
-//  - `metricsByArm()`  — per (arm, cap): accuracy with Wilson 95% confidence
-//    interval, mean sub-call count, mean prompt tokens (sum of the run's
-//    subCalls' promptTokens ?? estimatedTokens), mean completion tokens, cost
-//    proxy (mean total tokens = prompt + completion), mean wall ms, degraded
-//    count, error count, and how many sub-call token figures fell back to the
-//    estimate (honesty).
-//  - `mcnemarByCap()` — paired exact McNemar (two-sided, exact binomial over
-//    the discordant pairs) comparing fleet vs truncation at each cap.
-//  - `toMarkdown()`    — the full report with a methodology section
-//    (sampling, per-call max_tokens, cap semantics, real-token tiers,
-//    statistics disclosure). The upstream appears as MODEL NAME + HOST only
-//    — never the API key, never a URL carrying credentials.
-//  - `writeReport()`   — writes `run-results.json` and `report.md` into an
-//    output directory (default `benchmark-results/`, chosen by the CLI).
+// The report layer — all pure except writeReport. `summaryTable()` grids
+// ✓/✗ per trial per arm×cap combo with a per-column accuracy footer;
+// `metricsByArm()` aggregates accuracy (Wilson 95% CI), sub-call counts,
+// token means and the cost proxy per (arm, cap); `mcnemarByCap()` runs the
+// paired exact McNemar fleet-vs-truncation per cap; `toMarkdown()` renders
+// the full report with methodology and honesty notes; `writeReport()` writes
+// `run-results.json` + `report.md`. The upstream appears as model name + host
+// only — never the API key, never a URL carrying credentials.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

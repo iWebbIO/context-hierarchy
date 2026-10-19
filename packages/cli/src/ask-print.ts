@@ -1,8 +1,7 @@
 // ask-print — the `--stats` formatting, kept model-free so it is testable
-// without any adapter or network (brief R4).
-//
-// One compact line per sub-call — label, tokens, latency — plus the flags
-// that matter operationally (cache-hit, degraded). Example:
+// without any adapter or network. One compact line per sub-call — label,
+// tokens, latency — plus the flags that matter operationally (cache-hit,
+// degraded). Example:
 //
 //   sub-calls: 2
 //     1. direct  tokens 9t est / 12+3t actual  latency 118ms

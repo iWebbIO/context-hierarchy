@@ -1,9 +1,8 @@
-// M2 Track A — synthetic contamination-proof suite (12 tasks).
-//
-// Every entity is INVENTED: vessel names are built from syllable tables,
-// codes are drawn from per-haystack unique pools, and the setting ("Ore
-// Relay Terminal 9") is fictional. Nothing here appears on the internet,
-// so no model can have memorized the answers (Letta Context-Bench style).
+// Synthetic contamination-proof suite (12 tasks). Every entity is INVENTED:
+// vessel names are built from syllable tables, codes are drawn from
+// per-haystack unique pools, and the setting ("Ore Relay Terminal 9") is
+// fictional — nothing here appears on the internet, so no model can have
+// memorized the answers.
 //
 // Ground truths are DERIVED PROGRAMMATICALLY, never hand-typed:
 //   needle   — the answer IS the code the generator planted (unique pool);

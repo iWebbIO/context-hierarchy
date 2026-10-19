@@ -1,43 +1,10 @@
-// HierarchyStrategy — the DEFAULT strategy: the filesystem tiered memory that
-// makes small-context serving survivable (task-4 brief).
-//
-// fit() pipeline:
-//   Stage 1 — rule-based elision (deterministic, zero LLM): tool-role messages
-//   older than the LAST 3 message indices become a one-line placeholder
-//   `[elided tool result: <first 60 chars>…]`, and runs of 3+ blank lines
-//   collapse to a single blank line. If the elided list fits the budget, it is
-//   returned immediately — ZERO adapter calls.
-//   Stage 2 — exactly ONE capped condense call over the MIDDLE (every
-//   non-system message older than the last 4). The condense prompt is the
-//   fixed instruction plus the ELIDED middle, hard-fitted to the budget with
-//   the internal TruncationStrategy when needed and estimated pre-dispatch
-//   (global constraint 1: a condense call is a model call like any other).
-//   With an EMPTY middle there is nothing to condense: no adapter call and no
-//   digest message — the "digest of nothing" case resolves via the Stage-3
-//   hard-fit alone.
-//   Stage 3 — compose + hard-fit: [all system messages] + [one digest message
-//   wrapped in [condensed history]…[/condensed history]] + [the last 4
-//   non-system messages], hard-fitted with the internal truncation strategy so
-//   the result NEVER exceeds the budget (the digest counts as a normal
-//   message; it gets no special protection).
-//
-// Spilling: every INPUT message that does not appear verbatim in the final
-// result is written once as a content-addressed file under
-// `${dataDir}/hierarchy/spills/<sha256>.json` (append-only; existing files are
-// never rewritten) and recorded with the reason it left:
-//   "elided"    — its Stage-1 reduced form (placeholder / collapsed blanks)
-//                 survived; the original is restorable from the spill.
-//   "condensed" — it was middle material, replaced by the digest.
-//   "dropped" / "middle-cut" — removed or cut by the final hard-fit.
-// The digest message itself is never spilled: it is not an input message, and
-// every message it stands for is already spilled in full.
-//
-// Deliberate design decisions (the brief is silent on these):
-//   - Under-budget input passes through verbatim (same list reference, empty
-//     spill) — consistent with the TruncationStrategy seam contract.
-//   - The digest message has role "user": the brief pins only its content.
-//   - An adapter error on the condense call propagates; degradation to a
-//     truncation-fit call is owned by the engine (global constraint 10).
+// HierarchyStrategy: the default strategy, a tiered filesystem memory that
+// makes small-context serving survivable. fit() runs three stages: rule-based
+// elision (deterministic, no adapter call), then exactly one capped condense
+// call over the middle, then a compose + hard-fit with the internal
+// TruncationStrategy so the result never exceeds the budget. Every input
+// message not verbatim in the result is spilled, with its reason, to a
+// content-addressed file restorable by pointer.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -52,27 +19,24 @@ import type {
 import { TruncationStrategy } from "./truncation.js";
 import type { ChatMessage, Role, ToolCall } from "../types.js";
 
-/** Condense instruction — embedded VERBATIM in the condense prompt (brief R1). */
+/** Condense instruction, embedded verbatim in the condense prompt. */
 const CONDENSE_INSTRUCTION =
   "You compress a conversation history for a model with a very small context window. Preserve VERBATIM: all code blocks, quoted strings, file paths, identifiers, numbers, URLs, and every decision or commitment made. Output plain text only, no preamble, no meta-commentary. Be dense; omit nothing load-bearing.";
 
-/** Digest wrap markers (brief R1, stage 3). */
+/** Digest wrap markers around the condense output. */
 const DIGEST_OPEN = "[condensed history]";
 const DIGEST_CLOSE = "[/condensed history]";
 
 /** Tail size: the last 4 non-system messages pass through verbatim. */
 const TAIL_KEEP = 4;
-/** tool-role messages within the LAST 3 message indices escape elision. */
+/** tool-role messages within the last 3 message indices escape elision. */
 const TOOL_RECENT_INDICES = 3;
 /** Excerpt length inside the tool-result placeholder, in characters. */
 const EXCERPT_CHARS = 60;
-/** max_tokens for the single condense call (brief R1). */
+/** max_tokens for the single condense call. */
 const CONDENSE_MAX_TOKENS = 800;
 
-// The spill pointer shape is shared with the engine's spill store — imported
-// from engine-spill-store.ts (one source of truth, no second regex).
-
-/** The four spill reasons this strategy records (brief R2). */
+/** The four spill reasons this strategy records. */
 type HierarchySpillReason = "elided" | "condensed" | "dropped" | "middle-cut";
 
 /** Raised by `restore` for an unknown or corrupt pointer — never returns garbage. */
@@ -187,7 +151,7 @@ function parseSpilledMessage(parsed: unknown, pointer: string): ChatMessage {
 export class HierarchyStrategy implements ContextStrategy {
   readonly name = "hierarchy";
 
-  /** Composed for this strategy's own hard-fitting needs (brief R1). */
+  /** Composed for this strategy's own hard-fitting needs. */
   private readonly truncation = new TruncationStrategy();
 
   async fit(
@@ -209,7 +173,7 @@ export class HierarchyStrategy implements ContextStrategy {
       return { messages, spill: [] };
     }
 
-    // ---- Stage 1: rule-based elision (deterministic, zero LLM) ----
+    // ---- Stage 1: rule-based elision (deterministic, no adapter call) ----
     // Tool results older than the last 3 message indices become one-line
     // placeholders; runs of 3+ blank lines collapse. Untouched messages keep
     // their original object reference (identity drives the spill bookkeeping).
@@ -231,7 +195,7 @@ export class HierarchyStrategy implements ContextStrategy {
       return { messages: stage1, spill };
     }
 
-    // ---- Stage 2: exactly one capped condense call over the MIDDLE ----
+    // ---- Stage 2: exactly one capped condense call over the middle ----
     // Middle = every non-system message older than the tail (last 4).
     const systemIdx: number[] = [];
     const nonSystemIdx: number[] = [];
@@ -284,7 +248,7 @@ export class HierarchyStrategy implements ContextStrategy {
     invariant(estimate(fitted) <= budgetTokens, "fitted result exceeds the cap");
 
     // Map the hard-fit's removals back to input indices. Composition layout:
-    // [systems…][digest?][tail…]; the digest is not an input message — it is
+    // [systems…][digest?][tail…]; the digest is not an input message, so it is
     // skipped (the middle's originals are already spilled in full).
     const digestAt = digest !== null ? systemIdx.length : -1;
     const hardFate = new Map<number, HierarchySpillReason>();

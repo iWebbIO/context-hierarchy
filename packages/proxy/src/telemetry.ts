@@ -1,14 +1,12 @@
-// Telemetry — append-only JSONL record of what the proxy actually did.
+// Telemetry — append-only JSONL record of what the proxy actually did,
+// written to `${DATA_DIR}/telemetry.jsonl`. Two event kinds share one file:
+// `http` (one per HTTP request: path, stream?, status, latency) and
+// `subcall` (one per completed model call, the engine's SubCallEvent
+// verbatim with `ts` stamped here).
 //
-// Two event kinds share one file (`${DATA_DIR}/telemetry.jsonl`):
-//   http    — one per HTTP request (path, stream?, status, latency)
-//   subcall — one per completed model call, accepting the engine's
-//             `SubCallEvent` verbatim (ts is stamped here; the engine's
-//             events carry no timestamp).
-//
-// Telemetry is strictly best-effort (task-6 brief R1): no method ever throws
-// into request handling — every failure is swallowed with a single console
-// warning. `entries()` reads the whole file back (for tests and inspection).
+// Telemetry is strictly best-effort: no method ever throws into request
+// handling — every failure is swallowed with a single console warning.
+// `entries()` reads the whole file back (for tests and inspection).
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";

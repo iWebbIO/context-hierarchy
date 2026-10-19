@@ -1,6 +1,5 @@
-// Proxy server tests (task-6 brief R6): REAL FleetEngine over a scripted
-// fake adapter, temp dataDirs, everything through fastify.inject() — zero
-// network. Scenarios (a)–(h) from the brief.
+// Proxy server tests: REAL FleetEngine over a scripted fake adapter, temp
+// dataDirs, everything through fastify.inject() — zero network.
 //
 // Fake-adapter scripts classify calls the same way the fleet-engine tests
 // do: worker (carries the verbatim worker instruction), planner
@@ -206,7 +205,7 @@ function wireChunks(payloads: unknown[]): WireChunk[] {
 const CAP = 600;
 
 describe("POST /v1/chat/completions — non-stream", () => {
-  it("(a) small request passthrough: OpenAI shape, usage present, telemetry logged", async () => {
+  it("small request passthrough: OpenAI shape, usage present, telemetry logged", async () => {
     const directResult: ChatResult = {
       content: "a small direct answer",
       finishReason: "stop",
@@ -267,7 +266,7 @@ describe("POST /v1/chat/completions — non-stream", () => {
     ]);
   });
 
-  it("(b) oversized request: fleet engaged, valid response, every sub-call ≤ cap", async () => {
+  it("oversized request: fleet engaged, valid response, every sub-call ≤ cap", async () => {
     const h = makeHarness({
       onChat: (params) => {
       switch (callRole(params)) {
@@ -366,7 +365,7 @@ describe("POST /v1/chat/completions — non-stream", () => {
     expect(res.json().choices[0].finish_reason).toBe("tool_calls");
   });
 
-  it("(e) degraded: fleet failure → 200 with x-context-hierarchy-degraded: true", async () => {
+  it("degraded: fleet failure → 200 with x-context-hierarchy-degraded: true", async () => {
     const h = makeHarness({
       onChat: (params) => {
         if (callRole(params) !== "direct") {
@@ -417,7 +416,7 @@ describe("POST /v1/chat/completions — non-stream", () => {
     });
   });
 
-  it("(h) malformed JSON body → 400 invalid_request_error", async () => {
+  it("malformed JSON body → 400 invalid_request_error", async () => {
     const h = makeHarness({ onChat: () => ({ content: "x", finishReason: "stop" }) });
 
     const res = await chat(h.app, "{not json");
@@ -440,7 +439,7 @@ describe("POST /v1/chat/completions — non-stream", () => {
     expect(h.adapter.calls.length).toBe(0);
   });
 
-  it("(f) PROXY_API_KEY gate: 401 without the header, 200 with it", async () => {
+  it("PROXY_API_KEY gate: 401 without the header, 200 with it", async () => {
     const h = makeHarness({
       onChat: () => ({ content: "gated answer", finishReason: "stop" }),
       proxyApiKey: "secret-gate",
@@ -564,7 +563,7 @@ describe("POST /v1/chat/completions — stream", () => {
     });
   }
 
-  it("(c) oversized stream: role chunk, content deltas, finish, [DONE]; include_usage chunk", async () => {
+  it("oversized stream: role chunk, content deltas, finish, [DONE]; include_usage chunk", async () => {
     const h = fleetHarness();
     const messages = conversation(8, 100);
     const accountant = new TokenAccountant({ dataDir: h.dataDir });
@@ -616,7 +615,7 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(http[0].status).toBe(200);
   });
 
-  it("(c') stream without include_usage: no usage chunk", async () => {
+  it("stream without include_usage: no usage chunk", async () => {
     const h = fleetHarness();
     const res = await chat(h.app, { messages: conversation(8, 100), stream: true });
 
@@ -627,7 +626,7 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
-  it("(d) tool-call deltas: proxy re-chunks with correct index/id/name/arguments", async () => {
+  it("tool-call deltas: proxy re-chunks with correct index/id/name/arguments", async () => {
     const toolStream: StreamEvent[] = [
       {
         type: "delta",
@@ -723,11 +722,11 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
-  it("(e-stream) degraded stream: SSE comment marker + flagged sub-call telemetry + finish_reason", async () => {
+  it("degraded stream: SSE comment marker + flagged sub-call telemetry + finish_reason", async () => {
     // Fleet fails before the first yield → the stream degrades. Headers are
     // already sent, so the marker rides as an SSE comment line; the finish
     // chunk still carries its finish_reason; the sub-call telemetry event
-    // is flagged degraded (constraint 10, streaming path).
+    // is flagged degraded on the streaming path.
     const degradedStream: StreamEvent[] = [
       { type: "delta", content: "degraded " },
       { type: "delta", content: "stream answer" },
@@ -765,7 +764,7 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(subcalls.some((e) => e.degraded === true && e.call === "direct")).toBe(true);
   });
 
-  it("(e-stream') a degraded stream WITHOUT a finish synthesizes finish_reason: null (SDK-clean end)", async () => {
+  it("a degraded stream without a finish synthesizes finish_reason: null (SDK-clean end)", async () => {
     // The degraded direct stream ended without a finish event: the engine
     // synthesizes a degraded finish; the proxy maps its empty reason to null
     // so OpenAI clients see a terminal chunk (the e2e SDK path resolves).
@@ -887,7 +886,7 @@ describe("POST /v1/chat/completions — stream", () => {
 });
 
 describe("GET /v1/models", () => {
-  it("(g) passes the adapter's models payload through", async () => {
+  it("passes the adapter's models payload through", async () => {
     const h = makeHarness({ onChat: () => ({ content: "x", finishReason: "stop" }) });
 
     const res = await h.app.inject({ method: "GET", url: "/v1/models" });
@@ -899,7 +898,7 @@ describe("GET /v1/models", () => {
     });
   });
 
-  it("(g') the auth gate covers /v1/models too", async () => {
+  it("the auth gate covers /v1/models too", async () => {
     const h = makeHarness({
       onChat: () => ({ content: "x", finishReason: "stop" }),
       proxyApiKey: "secret-gate",

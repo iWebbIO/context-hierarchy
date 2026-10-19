@@ -1,6 +1,6 @@
-// M2 Track A — benchmark task types (PINNED FORMAT — do not change).
-// The rig consumes exactly this shape; the interfaces below are copied
-// verbatim from the Track A brief.
+// Benchmark task types (PINNED FORMAT — do not change). The rig consumes
+// exactly this shape; it mirrors src/types.ts, and the two must stay in
+// lockstep.
 
 import type { ChatMessage } from "@context-hierarchy/core";
 

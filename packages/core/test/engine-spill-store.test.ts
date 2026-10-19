@@ -1,6 +1,6 @@
-// EngineSpillStore tests (final-review fix wave) — durable, hash-verified
-// spill records for engine-initiated strategy fits (global constraint 6,
-// engine side). Temp dataDirs only; nothing here touches the network.
+// EngineSpillStore tests — durable, hash-verified spill records for
+// engine-initiated strategy fits. Temp dataDirs only; nothing here touches
+// the network.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";

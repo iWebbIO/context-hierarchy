@@ -1,29 +1,10 @@
-// EngineSpillStore — durable spill records for ENGINE-initiated fits.
-//
-// The dispatch funnel strategy-fits every over-cap message list before it
-// leaves the engine (worker slices, the synthesizer prompt, degraded direct
-// calls). Whatever such a fit removed must not vanish: the reversibility
-// constraint ("every removed message lands in a spill record restorable by
-// pointer") binds the ENGINE's fits just as it binds the strategies' own —
-// and a diskless strategy (TruncationStrategy, a supported `STRATEGY`
-// configuration) leaves the engine as the only place that record can come
-// from. Under the default HierarchyStrategy the engine's record duplicates
-// what the strategy itself already persisted; that is deliberate — the
-// record is written uniformly, whatever the configured strategy does.
-//
-// One content-addressed JSON file per fit: `${dataDir}/engine-spills/<key>.json`
-// where key = sha256(JSON.stringify({ call, messages })) over the fit's INPUT
-// (the list the spill indices refer to). The record holds the full input, the
-// full spill (each entry already carries the complete original message), and
-// a per-entry pointer naming this file — `restore(pointer)` reads it back and
-// verifies the hash. Files are written once (open-exclusive "wx"); a same-key
-// refit resolves benignly (append-only, first record wins).
-//
-// Write failures PROPAGATE (unlike the best-effort distillate cache): a spill
-// record is a reversibility guarantee, not an accelerator — silently dropping
-// it would silently discard messages, the exact thing the constraint forbids.
-// The failing dispatch degrades like any model-call failure; that is the same
-// stance HierarchyStrategy takes on its own spill files.
+// EngineSpillStore: durable spill records for engine-initiated fits (the
+// dispatch funnel's worker slices, synthesizer prompts, degraded calls).
+// One content-addressed JSON file per fit under `${dataDir}/engine-spills`,
+// holding the fit's input, full spill and per-entry pointers, read back
+// hash-verified via `restore(pointer)`; records are written once
+// (append-only, first record wins). Write failures propagate: a spill
+// record is a reversibility guarantee, not a best-effort accelerator.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -33,7 +14,7 @@ import type { ChatMessage, ToolCall } from "./types.js";
 import type { SpilledMessage } from "./strategy.js";
 
 /** Spill pointer shape: 64 lowercase hex chars + `.json` (same as hierarchy).
- *  Exported as THE one pointer-shape source — hierarchy imports it. */
+ *  Exported as the one pointer-shape source; hierarchy imports it. */
 export const POINTER_RE = /^[0-9a-f]{64}\.json$/;
 
 /** One recorded removal: the seam's SpilledMessage plus this record's pointer. */
@@ -46,7 +27,7 @@ export interface EngineSpillEntry extends SpilledMessage {
 export interface EngineSpillRecord {
   /** The sub-call kind whose dispatch triggered the fit. */
   call: string;
-  /** The fit's INPUT message list — the indices in `spill` refer to it. */
+  /** The fit's input message list; the indices in `spill` refer to it. */
   input: ChatMessage[];
   /** Everything the fit removed, each with the full original message. */
   spill: EngineSpillEntry[];
@@ -132,10 +113,11 @@ export class EngineSpillStore {
   }
 
   /**
-   * Persist one engine-initiated fit's spill. Nothing removed → no record
-   * (null). The file is written once (open-exclusive); a same-key refit is a
-   * benign no-op (append-only, first record wins). IO failures propagate —
-   * see the module header for why this is deliberately NOT best-effort.
+   * Persist one engine-initiated fit's spill. Nothing removed means no
+   * record (null). The file is written once (open-exclusive); a same-key
+   * refit is a benign no-op (append-only, first record wins). IO failures
+   * propagate; see the module header for why this is deliberately not
+   * best-effort.
    */
   async record(
     call: string,

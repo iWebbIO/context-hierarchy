@@ -1,73 +1,10 @@
-// FleetEngine — the heart: passthrough vs fleet orchestration under the cap.
-//
-// Regions: a request decomposes into the SYSTEM BLOCK (every `system`
-// message), the TAIL (the last `user` message, kept verbatim everywhere it
-// reappears), and the MIDDLE (everything else) — the only region workers
-// compress. With no user message the tail is absent; with no middle the
-// fleet degenerates to a single synthesizer call over system + tail.
-//
-// The dispatch funnel (global constraint 1): EVERY outgoing adapter call —
-// direct, planner, worker, reducer, synthesizer, streamed or not — goes through
-// `dispatch`/`dispatchStream`, which estimates first and strategy-fits any
-// over-cap message list before it leaves. A post-fit estimate still over
-// the cap is an engine bug: `InternalCapViolation` is thrown, never a silent
-// over-cap dispatch. Every completed call emits an `onSubCall` event with the
-// POST-FIT estimate (always ≤ cap) and the usage the result carried.
-//
-// Fleet pipeline (run + stream share it):
-//   cache miss → TOC (deterministic, no LLM) → planner (LLM, ≤ 500 max
-//   tokens, any failure → fixed map-reduce fallback) → workers (≤ maxWorkers
-//   in flight, each compressing its verbatim slice under the cap) → digest
-//   bounding (over-budget digest blocks are REDUCED — merged by further
-//   capped reducer calls, at most 2 levels, then middle-cut as text; the
-//   block is never dropped, because it is the only carrier of the middle
-//   region) → synthesizer ([system] + [wrapped digests] + [original last
-//   user message]) → distillate put (bounded digests + final).
-//
-// The cache key covers every request parameter that changes the answer
-// (messages, cap, model, tools, temperature, max_tokens — see
-// DistillateCache.keyFor); the synthesizer inherits the user's tools,
-// tool_choice, temperature and max_tokens (one tool semantics across the
-// passthrough, fleet and degraded paths).
-//
-// Cancellation: run/stream accept an optional AbortSignal and thread it to
-// EVERY dispatch (direct, planner, workers, reducer, synthesizer, degraded),
-// where the adapter aborts the in-flight upstream call. A disconnected
-// streaming client therefore stops the fleet, not just the response.
-//
-// Degradation (global constraint 10, owned HERE): run() wraps the whole
-// fleet path in a try/catch — ANY failure falls back to strategy-fitting
-// the ORIGINAL request (a throwing strategy degrades further to a bare
-// TruncationStrategy) and one direct dispatch, returned with `degraded:
-// true`. The engine never throws for fleet-internal reasons; what CAN
-// propagate is an upstream error from that final direct call, or
-// InternalCapViolation when even the truncation floor cannot fit the cap
-// (the mathematically unsatisfiable input class). stream() degrades the
-// same way but only BEFORE the first event was yielded — after that a
-// second stream would duplicate output, so the error surfaces honestly
-// instead. A degraded stream IS marked: the degraded dispatch's finish
-// event carries `degraded: true` (a stream that ends without a finish gets
-// a synthetic degraded finish), the sub-call telemetry event carries the
-// same flag, and the proxy additionally emits an SSE comment marker —
-// headers are already sent by then, so the header cannot be set.
-//
-// Reversibility (global constraint 6, engine side): every strategy fit the
-// dispatch funnel performs (worker slices, synthesizer, degraded fits) is
-// recorded through the EngineSpillStore — whatever the fit removed lands in
-// a durable spill record restorable by pointer, whatever the configured
-// strategy itself persists. A spill record is a guarantee, not an
-// accelerator: a failure to WRITE it propagates like any fit failure (the
-// request degrades), rather than silently discarding messages.
-//
-// Calibration (global constraint 8): every dispatch with reported upstream
-// usage folds its actual/estimated prompt-token ratio into the accountant's
-// per-model EMA (`observeUsage`), so persisted factors track the real model
-// instead of staying 1.0 forever.
-//
-// Documented quirk: a cache-hit replay's `onSubCall` event carries
-// `cacheHit: true` and the FULL request estimate — which is over the cap by
-// definition (only over-cap requests fleet). The event records what the
-// replay stood in for, not a dispatch; nothing was sent upstream.
+// FleetEngine: passthrough vs fleet orchestration under the token cap.
+// A request decomposes into the system block, the middle (the only region
+// workers compress) and the tail (the last user message, kept verbatim).
+// Invariant: every adapter call flows through dispatch/dispatchStream,
+// which estimates first, strategy-fits any over-cap message list, and
+// throws InternalCapViolation rather than dispatch over the cap. Any fleet
+// failure degrades to a single truncation-fit direct call, marked degraded.
 
 import { DistillateCache } from "./distillate-cache.js";
 import type { DistillateFinal } from "./distillate-cache.js";
@@ -79,20 +16,20 @@ import type { TokenAccountant } from "./token-accountant.js";
 import { countTokens } from "./token-count.js";
 import type { ChatMessage, ChatParams, ChatResult, StreamEvent, Usage } from "./types.js";
 
-/** Worker instruction — VERBATIM from the task-5 brief (R2). */
+/** Instruction appended to every worker's slice. */
 const WORKER_INSTRUCTION =
   "Compress your assigned slice into a dense digest. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.";
 
-/** Planner output budget (brief R2). */
+/** Planner output budget. */
 const PLANNER_MAX_TOKENS = 500;
-/** Worker output budget when an assignment carries none, and the ceiling for any (brief R2). */
+/** Worker output budget when an assignment carries none, and the ceiling for any. */
 const DEFAULT_WORKER_BUDGET = 1000;
 const MAX_WORKER_BUDGET = 1000;
-/** Workers in flight at once, absent an explicit cfg (brief R2). */
+/** Workers in flight at once, absent an explicit cfg. */
 const DEFAULT_MAX_WORKERS = 3;
-/** TOC preview length, in characters (brief R2). */
+/** TOC preview length, in characters. */
 const TOC_PREVIEW_CHARS = 60;
-/** Cache-replay delta chunk size, in tokens (brief R2: "~20-token chunks"). */
+/** Cache-replay delta chunk size, in tokens. */
 const REPLAY_CHUNK_TOKENS = 20;
 
 /** Reducer instruction: merge digest blocks into one bounded digest. */
@@ -105,11 +42,11 @@ const REDUCE_MAX_TOKENS = 1000;
 const DIGEST_BLOCK_MARGIN = 250;
 /** Reduce passes over the digests before the text middle-cut fallback. */
 const MAX_REDUCE_LEVELS = 2;
-/** Below this available budget, digest bounding is skipped — the dispatch fit
+/** Below this available budget, digest bounding is skipped; the dispatch fit
  * and the degradation path own such degenerate caps. */
 const MIN_DIGEST_BUDGET = 200;
 
-/** Planner instruction (brief R2: output ONLY a JSON array of assignments). */
+/** Planner instruction; the expected output is a bare JSON array of assignments. */
 const PLANNER_INSTRUCTION = [
   "You are planning the compression of a conversation for a model with a small context window.",
   "The table of contents above lists every message in the form #<index> <role> ~<estimate>t: <preview>.",
@@ -119,7 +56,7 @@ const PLANNER_INSTRUCTION = [
   "The assignments must together cover the entire middle region; use as few workers as possible.",
 ].join(" ");
 
-/** One telemetry event per completed model call (plan contract, task 5). */
+/** One telemetry event per completed model call. */
 export interface SubCallEvent {
   call: "direct" | "planner" | "worker" | "reducer" | "synthesizer";
   estimatedTokens: number;
@@ -128,21 +65,20 @@ export interface SubCallEvent {
   latencyMs: number;
   cacheHit: boolean;
   /**
-   * Set when this call was the degraded fallback (a fleet failure answered by
-   * one truncation-fit direct call) — global constraint 10's "marked
-   * degraded", on the telemetry path where the proxy's stream responses
-   * cannot carry the HTTP header.
+   * Set when this call was the degraded fallback (a fleet failure answered
+   * by one truncation-fit direct call). The telemetry path carries the
+   * flag where a streaming response can no longer set an HTTP header.
    */
   degraded?: boolean;
   /**
-   * WHY the fleet degraded (the caught failure's message, bounded), carried
+   * Why the fleet degraded (the caught failure's message, bounded), carried
    * on the degraded dispatch's event so a degradation is diagnosable, not
    * just observable. Absent on every other event.
    */
   degradedReason?: string;
 }
 
-/** Constructor config (plan contract, task 5). */
+/** Constructor config. */
 export interface FleetEngineConfig {
   adapter: ProviderAdapter;
   accountant: TokenAccountant;
@@ -152,7 +88,7 @@ export interface FleetEngineConfig {
   dataDir: string;
   maxWorkers?: number;
   onSubCall?: (event: SubCallEvent) => void;
-  /** Skip the planner call and slice with fixed map-reduce directly — a
+  /** Skip the planner call and slice with fixed map-reduce directly; a
    * deterministic arm for benchmarking (the proxy never sets this). */
   plannerDisabled?: boolean;
 }
@@ -236,9 +172,9 @@ interface FleetPlan {
 
 /**
  * Parse and sanitize planner output into worker slices over the middle
- * region. Returns undefined for ANY planner failure (no array, garbage,
- * nothing valid left after clamping, coverage gaps) — the caller falls back
- * to fixed map-reduce. Tolerates a leading ```json fence and surrounding
+ * region. Returns undefined for any planner failure (no array, garbage,
+ * nothing valid left after clamping, coverage gaps); the caller then falls
+ * back to fixed map-reduce. Tolerates a leading ```json fence and surrounding
  * prose by extracting the outermost [ ... ] span before parsing.
  */
 function parseAssignments(
@@ -276,9 +212,9 @@ function parseAssignments(
   if (ranges.length === 0) return undefined;
   ranges.sort((a, b) => a.start - b.start || a.end - b.end);
 
-  // Each middle index goes to the FIRST range claiming it (deterministic
+  // Each middle index goes to the first range claiming it (deterministic
   // under planner overlap); a range that claims no middle index gets no
-  // worker. Any unclaimed middle index is a coverage gap → planner failure.
+  // worker. Any unclaimed middle index is a coverage gap, i.e. planner failure.
   const claimed = new Set<number>();
   const slices: WorkerSlice[] = [];
   for (const range of ranges) {
@@ -307,9 +243,9 @@ function equalChunks(items: number[], k: number): number[][] {
 /**
  * Split recorded content into ~target-token delta pieces for cache replay.
  * Pieces are cut at whitespace runs so `pieces.join("") === content` exactly.
- * Each part is token-counted ONCE and the counts accumulated — the target is
- * soft (a piece that overshoots by the length of one part is fine), so no
- * growing-buffer re-encode (the O(n²) this replaces).
+ * Each part is token-counted once and the counts accumulated; the target is
+ * soft (a piece that overshoots by the length of one part is fine), so there
+ * is no growing-buffer re-encode (which would be O(n²)).
  */
 function chunkByTokens(content: string, target: number): string[] {
   if (content.length === 0) return [];
@@ -368,16 +304,16 @@ export class FleetEngine {
   }
 
   // ------------------------------------------------------------------
-  // The dispatch funnel — every outgoing adapter call passes through here.
+  // The dispatch funnel: every outgoing adapter call passes through here.
   // ------------------------------------------------------------------
 
   /**
    * Estimate, strategy-fit over-cap messages, verify, and never dispatch over
    * cap. Whatever the fit removed is recorded durably through the
-   * EngineSpillStore (global constraint 6, engine side) — including under a
-   * diskless strategy, whose own spill record would otherwise not exist. A
-   * record-write failure propagates: a fit whose removals cannot be recorded
-   * is a failed fit, never a silent discard (the caller degrades).
+   * EngineSpillStore, including under a diskless strategy whose own spill
+   * record would otherwise not exist. A record-write failure propagates: a
+   * fit whose removals cannot be recorded is a failed fit, never a silent
+   * discard (the caller degrades).
    */
   private async fitForCap(
     params: ChatParams,
@@ -397,7 +333,7 @@ export class FleetEngine {
           `post-fit estimate ${estimatedTokens} exceeds cap ${this.capTokens} (strategy: ${this.strategy.name})`,
         );
       }
-      // The fit's output is what will be dispatched — its removals are now
+      // The fit's output is what will be dispatched, so its removals are now
       // landable in a durable record.
       await this.spills.record(call, params.messages, fit.spill);
     }
@@ -436,10 +372,9 @@ export class FleetEngine {
   }
 
   /**
-   * Fold one dispatch's actual prompt tokens into the per-model EMA factor
-   * (global constraint 8's calibration loop). The estimate is what the funnel
-   * computed for the messages actually sent; nothing is observed when the
-   * upstream reported no usage.
+   * Fold one dispatch's actual prompt tokens into the per-model EMA factor.
+   * The estimate is what the funnel computed for the messages actually sent;
+   * nothing is observed when the upstream reported no usage.
    */
   private observeUsage(estimatedTokens: number, usage: Usage | undefined): void {
     if (usage === undefined) return;
@@ -487,10 +422,10 @@ export class FleetEngine {
   }
 
   /**
-   * Ask the planner for worker assignments. ANY failure — the call errored,
-   * the output is unparseable, nothing valid survives sanitization, the
-   * coverage is incomplete — returns undefined so the caller uses the fixed
-   * map-reduce fallback.
+   * Ask the planner for worker assignments. Any failure, whether the call
+   * errored, the output is unparseable, nothing valid survives sanitization
+   * or the coverage is incomplete, returns undefined so the caller uses the
+   * fixed map-reduce fallback.
    */
   private async planSlices(
     params: ChatParams,
@@ -499,7 +434,7 @@ export class FleetEngine {
     signal?: AbortSignal,
   ): Promise<WorkerSlice[] | undefined> {
     if (this.plannerDisabled) return undefined; // benchmark arm: straight to map-reduce
-    // ONE user message (TOC + the original ask + instruction): some strict
+    // One user message (TOC + the original ask + instruction): some strict
     // upstreams reject consecutive same-role turns, and a single block is
     // easier for a small model to follow.
     const parts: string[] = [toc];
@@ -520,7 +455,7 @@ export class FleetEngine {
       );
       return parseAssignments(result.content, params.messages.length, decomp.middleIdx);
     } catch (error) {
-      // ANY dispatch failure falls back to map-reduce — but never silently:
+      // Any dispatch failure falls back to map-reduce, but never silently:
       // the reason is logged so a transient upstream error is diagnosable.
       console.error(
         "[context-hierarchy] planner failed (%s); using map-reduce fallback",
@@ -610,9 +545,9 @@ export class FleetEngine {
 
   /**
    * The synthesizer prompt: [all system messages] + [one message joining the
-   * wrapped digests, in order] + [the ORIGINAL last user message, verbatim,
+   * wrapped digests, in order] + [the original last user message, verbatim,
    * last]. The request's `tools`, `tool_choice`, `temperature` and
-   * `max_tokens` are forwarded verbatim — the synthesizer answers the USER's
+   * `max_tokens` are forwarded verbatim: the synthesizer answers the user's
    * request, so it runs with the user's tool and sampling semantics, exactly
    * like the passthrough and degraded paths already did.
    */
@@ -631,13 +566,12 @@ export class FleetEngine {
   }
 
   /**
-   * Bound the digest block to the synthesizer's available budget. The digest
-   * block is the ONLY carrier of the middle region — a generic strategy fit
-   * treats an oversized block as an ordinary message and drops it whole
-   * (observed live: the synthesizer dispatched with the ask but no digests).
-   * Over-budget digests are REDUCED — merged by further capped "reducer"
-   * calls, at most MAX_REDUCE_LEVELS passes — and only if reduction cannot
-   * keep up, middle-cut as text. The block is never dropped.
+   * Bound the digest block to the synthesizer's available budget. The block
+   * is the only carrier of the middle region: a generic strategy fit would
+   * treat an oversized block as an ordinary message and drop it whole. So
+   * over-budget digests are first merged by further capped reducer calls
+   * (at most MAX_REDUCE_LEVELS passes) and, when reduction cannot keep up,
+   * middle-cut as text. The block is never dropped.
    */
   private async boundDigests(
     digests: string[],
@@ -661,7 +595,7 @@ export class FleetEngine {
       const room = available - estimateText(REDUCE_INSTRUCTION);
       // Greedy-pack digests into groups whose joined block fits `room`. The
       // packer's own singleton check (below) handles a room too small to
-      // merge anything — no extra floor here to misfire before it.
+      // merge anything; no extra floor here to misfire before it.
       const groups: string[][] = [];
       let group: string[] = [];
       for (const digest of current) {
@@ -723,7 +657,7 @@ export class FleetEngine {
   private async planAndCompress(params: ChatParams, signal?: AbortSignal): Promise<FleetPlan> {
     const decomp = decompose(params.messages);
     if (decomp.middleIdx.length === 0) {
-      // Nothing to compress — the fleet degenerates to the synthesizer call
+      // Nothing to compress: the fleet degenerates to the synthesizer call
       // over system + tail (the funnel fits that call if it overflows).
       return { digests: [], decomp };
     }
@@ -735,11 +669,11 @@ export class FleetEngine {
   }
 
   // ------------------------------------------------------------------
-  // Degradation (owned here — global constraint 10).
+  // Degradation.
   // ------------------------------------------------------------------
 
   /**
-   * Strategy-fit the ORIGINAL request for the degraded single direct call,
+   * Strategy-fit the original request for the degraded single direct call,
    * recording the fit's removals like any funnel fit. A configured strategy
    * that throws (including a throwing spill-record write) falls back to a
    * bare TruncationStrategy (the always-works baseline).
@@ -800,7 +734,10 @@ export class FleetEngine {
     const lookupStarted = Date.now();
     const cached = await this.cache.get(key);
     if (cached !== null && cached.final !== null) {
-      // Replay: no adapter call — the direct-shaped event is the marker.
+      // Replay: no adapter call, the direct-shaped event is the marker. The
+      // estimate is the original request's, over the cap by definition
+      // (only over-cap requests fleet); it records what the replay stood in
+      // for, not a dispatch.
       this.emitSubCall("direct", estimated, Date.now() - lookupStarted, true, cached.final.usage);
       const replay: ChatResult = {
         content: cached.final.content,
@@ -824,7 +761,7 @@ export class FleetEngine {
       await this.cache.put(key, { digests: bounded, final });
       return synth;
     } catch (e) {
-      // ANY fleet-path failure → degraded single direct call. Upstream
+      // Any fleet-path failure degrades to a single direct call. Upstream
       // errors from that final call propagate honestly (as does an
       // InternalCapViolation when even the truncation floor cannot fit).
       // The caught reason rides on the degraded event (why, not just that).
@@ -895,9 +832,9 @@ export class FleetEngine {
       }
     } catch (e) {
       if (deliveredAny) throw e; // degrading now would duplicate already-yielded output
-      // Nothing was yielded yet — degrade to one direct stream, marked: the
-      // finish event carries `degraded: true` (synthesized if the underlying
-      // stream ends without one) and the sub-call telemetry event does too.
+      // Nothing was yielded yet, so degrade to one direct stream, marked:
+      // the finish event carries `degraded: true` (synthesized if the
+      // underlying stream ends without one) and the sub-call event does too.
       const reason = reasonOf(e);
       const messages = await this.fitForDegradation(request);
       let sawFinish = false;

@@ -1,28 +1,24 @@
 #!/usr/bin/env node
-// ctxh — the context-hierarchy coding-harness CLI (brief R2).
-//
-// Three commands over the same landed core:
-//   ctxh serve   boots the OpenAI-compatible proxy (startProxy) — the server
-//                front door. ONE startup line: port + upstream host, never
-//                the API key and never a URL that could carry credentials.
-//                Ctrl-C closes the server cleanly.
-//   ctxh ask      one-shot question through the IN-PROCESS capped engine
-//                (ProviderAdapter → TokenAccountant → strategy → FleetEngine).
-//                Prints the answer to stdout; --stats adds a compact sub-call
-//                summary. Upstream errors exit non-zero with the message on
-//                stderr.
-//   ctxh config   the EFFECTIVE config: upstream HOST only, the API key
+// ctxh — the context-hierarchy coding-harness CLI. Three commands over the
+// shared core:
+//   ctxh serve   boots the OpenAI-compatible proxy (startProxy). One
+//                startup line: port + upstream host — never the API key,
+//                never a URL that could carry credentials. Ctrl-C closes
+//                the server cleanly.
+//   ctxh ask      one-shot question through the in-process capped engine
+//                (ProviderAdapter → TokenAccountant → strategy →
+//                FleetEngine). Prints the answer to stdout; --stats adds a
+//                compact sub-call summary. Upstream errors exit non-zero
+//                with the message on stderr.
+//   ctxh config   the effective config: upstream host only, the API key
 //                masked as set/unset, and the data dir path.
 //
 // Arg parsing is hand-rolled (no dep): flags may appear anywhere, `--flag
 // value` and `--flag=value` both work, an unknown flag (or any usage error)
-// prints the usage text and exits 2.
-//
-// Structure for testability: parseArgs / formatConfig / runAsk are exported
-// pure-ish units, and `main` takes an injectable IO plus an injectable
-// `runAsk` (the same DI pattern the proxy's buildServer uses) so the command
-// dispatch — including exactly what would print and the exit codes — is
-// tested without a model, a server, or a network.
+// prints the usage text and exits 2. parseArgs / formatConfig / runAsk are
+// exported, and `main` takes an injectable IO plus an injectable `runAsk`,
+// so dispatch — printing and exit codes included — is testable without a
+// model, a server, or a network.
 
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -187,7 +183,7 @@ export interface AskOptions {
   model?: string;
   /** Test seam: a scripted adapter instead of the real HTTP one. */
   adapter?: ProviderAdapter;
-  /** Extra loadConfig overrides (tests pin a fake upstream; the live smoke pins the real one). */
+  /** Extra loadConfig overrides (tests pin a fake upstream). */
   config?: Partial<ProxyConfig>;
 }
 
@@ -245,7 +241,7 @@ const consoleIO: CliIO = {
   err: (line) => console.error(line),
 };
 
-/** Injectable command internals — the same DI pattern the proxy uses. */
+/** Injectable command internals. */
 export interface CliDeps {
   /** Override runAsk (tests script it; production uses the real one). */
   runAsk?: typeof runAsk;

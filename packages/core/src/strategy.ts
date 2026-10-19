@@ -1,8 +1,7 @@
-// The strategy seam — the pluggable interface every context fitting flows
+// The strategy seam: the pluggable interface every context fitting flows
 // through. A strategy takes the full message list plus a hard token budget
 // and returns the messages that will actually be sent, plus a spill record
-// holding everything it removed (the reversibility constraint: what is removed
-// is restorable from the spill).
+// holding everything it removed, so what is removed is restorable.
 
 import type { ProviderAdapter } from "./provider-adapter.js";
 import type { TokenAccountant } from "./token-accountant.js";
@@ -24,7 +23,7 @@ export interface StrategyCtx {
 export interface SpilledMessage {
   /** Index of the message in the original input list. */
   index: number;
-  /** The FULL original message, untouched. */
+  /** The full original message, untouched. */
   message: ChatMessage;
   /** Why it was removed, e.g. "dropped-oldest" or "middle-cut". */
   reason: string;

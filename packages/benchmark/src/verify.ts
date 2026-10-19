@@ -1,32 +1,16 @@
-// Task verification — PURE, no I/O, unit-tested (brief R4).
-//
-// Rules (all graded in two forms — RAW (strict, exactly as written) and
-// NORMALIZED, quote-stripped):
-//  - `exact`    — `content.trim() === expected` (whitespace-tolerant, case- and
-//                 punctuation-strict).
-//  - `contains` — `content.includes(expected)` (raw substring, case-sensitive).
-//  - `numeric`  — the SIMPLE DIGIT-SUBSTRING rule: strip every non-digit from
-//                 both sides, then `contentDigits.includes(expectedDigits)`.
-//                 This is deliberately lenient: expected "5" matches content
-//                 "15 items" (digits "15" contain "5"). The brief pins this
-//                 rule and its false-positive risk is documented here and in
-//                 the README.
-//
-// Quote normalization: models often wrap the answer in a matching quote pair
-// (`"42"`, `'42'`, `` `42` ``), which the RAW rules reject. The normalized
-// graders strip up to two layers of MATCHING surrounding quote pairs before
-// comparing; `verifyTask` grades normalized (that is the headline
-// `correct`), `verifyTaskStrict` grades raw, so a report can measure how
-// much accuracy is quote-fragility.
-//
-// Strictness fallback (also brief R4): `standaloneNumberMatch` — the expected
-// digit run appears as a STANDALONE number in the content, i.e. not flanked
-// by further digits. `verifyNumericStrict` grades with ONLY that rule, so a
-// report can re-grade numeric results strictly and measure how much of the
-// lenient accuracy survives. In the lenient `verifyNumeric` the standalone
-// clause is subsumed by the digit-substring clause (any standalone match is
-// also a substring match on the digit-normalized strings), so the two are ORed
-// for equivalence with the brief's wording rather than for added coverage.
+// Task verification — pure, no I/O. Rules (each graded RAW and
+// quote-normalized): `exact` is `content.trim() === expected` (whitespace-
+// tolerant, case- and punctuation-strict); `contains` is a raw case-sensitive
+// substring; `numeric` is the digit-substring rule — strip every non-digit
+// from both sides, then compare — deliberately lenient (expected "5" matches
+// content "15 items"; the false-positive risk is documented in the README).
+// Quote normalization strips up to two layers of MATCHING surrounding quote
+// pairs before comparing, so a `"42"`-wrapped answer grades correct:
+// `verifyTask` is the normalized (headline) grade, `verifyTaskStrict` the raw
+// one. `standaloneNumberMatch` (the expected digits as a standalone number,
+// not flanked by further digits) backs `verifyNumericStrict` for strict
+// re-grading of numeric answers; in the lenient `verifyNumeric` it is subsumed
+// by the digit-substring clause and ORed in for equivalence.
 
 import type { TaskVerify } from "./types.js";
 

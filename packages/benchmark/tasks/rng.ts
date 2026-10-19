@@ -1,7 +1,5 @@
-// M2 Track A — deterministic randomness.
-//
-// Hard rule from the brief: NO Math.random and no clock reads anywhere in
-// the generators. Everything below is a seeded 32-bit linear congruential
+// Deterministic randomness. NO Math.random and no clock reads anywhere in
+// the generators: everything below is a seeded 32-bit linear congruential
 // generator, so the entire suite is a pure function of the seed constants
 // and is byte-identical on every run and every machine.
 

@@ -286,8 +286,8 @@ describe("TruncationStrategy.fit — middle-cut", () => {
 
 describe("TruncationStrategy.fit — system overflow (final resort)", () => {
   it("middle-cuts a single giant system message at the floor budget (64)", async () => {
-    // The ruling's case: one 3000-word system, budget 64 — the fit MUST
-    // succeed (a throw here was the spec deviation this path replaces).
+    // One 3000-word system at budget 64 — the fit MUST succeed; this path
+    // exists so it never throws.
     const ctx = makeCtx();
     const giantSystem: ChatMessage = { role: "system", content: text(3000) };
     const result = await strategy.fit({ messages: [giantSystem], budgetTokens: 64 }, ctx);
@@ -445,7 +445,7 @@ describe("TruncationStrategy.fit — system overflow (final resort)", () => {
     // 14 never-droppable messages at budget 64: each empty shell has a raw
     // cost of 4 tokens, and the joint estimate ceil(14 × 4 × 1.15) = 65 > 64
     // — no strategy can satisfy the cap. (13 shells cost 60 and fit.) This
-    // is the only input class left that throws; the classes from the ruling fit.
+    // is the only input class left that throws; every other input class fits.
     const ctx = makeCtx();
     const fourteenSystems = Array.from(
       { length: 14 },

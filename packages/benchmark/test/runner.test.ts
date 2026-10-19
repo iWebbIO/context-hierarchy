@@ -1,20 +1,10 @@
-// Benchmark rig tests (brief R7). NO network, NO .env read: the "upstream" is
-// a scripted fetch (a fake adapter at the HTTP boundary the real arms use),
-// loaders into main() are injected, and dry-run never resolves configuration.
-//
-// Coverage:
-//   (a) every RunResult of the grid recorded,
-//   (b) correctness computed against scripted answers (one right, one wrong),
-//   (c) per-run dataDirs fresh — two trials of one combo BOTH make adapter
-//       calls, so the DistillateCache never replays a trial,
-//   (d) the concurrency bound observed at the adapter (single-call arm, so
-//       in-flight chats == in-flight runs: peak is exactly the bound),
-//   (e) the wall-clock guard records error:"timeout" on a hanging call,
-//   (f) verification unit tests (exact / contains / numeric + strict rule),
-//   (g) --dry-run prints plan + inventory and touches no adapter, no config.
-// Plus unit tests for the task-suite validator, the CLI arg parser, and the
-// report layer (tables, metrics math with the estimated-token fallback, the
-// never-the-key rule, writeReport artifacts).
+// Benchmark rig tests. NO network, NO .env read: the "upstream" is a scripted
+// fetch (a fake adapter at the HTTP boundary the real arms use), loaders into
+// main() are injected, and dry-run never resolves configuration. Covers the
+// full grid recording, correctness against scripted answers, per-run dataDir
+// freshness (the cache never replays a trial), the concurrency bound, the
+// wall-clock guard, verification unit tests, and the dry-run path — plus the
+// task-suite validator, the CLI arg parser, and the report layer.
 
 import { afterAll, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -181,7 +171,7 @@ afterAll(() => {
 });
 
 // --------------------------------------------------------------------------
-// Verification (f) — pure, unit-tested
+// Verification — pure, unit-tested
 // --------------------------------------------------------------------------
 
 describe("verifyTask", () => {
@@ -295,11 +285,11 @@ describe("validateTasks", () => {
 });
 
 // --------------------------------------------------------------------------
-// The grid (a) + (b)
+// The grid: recording and correctness
 // --------------------------------------------------------------------------
 
 describe("runGrid", () => {
-  it("(a)+(b) records every cell of 2 tasks × 2 caps × 2 arms + uncapped, correct per scripted answer", async () => {
+  it("records every cell of 2 tasks × 2 caps × 2 arms + uncapped, correct per scripted answer", async () => {
     const { fetch } = makeScriptedFetch();
     const results = await runGrid({
       tasks: [taskRight, taskWrong],
@@ -330,7 +320,7 @@ describe("runGrid", () => {
       expect(r.trial).toBe(1);
     }
 
-    // (b) one right, one wrong — everywhere, in every arm.
+    // One right, one wrong — everywhere, in every arm.
     for (const r of results) {
       expect(r.correct, `${r.taskId} ${r.arm}@${r.capTokens}`).toBe(r.taskId === "synth-right");
     }
@@ -366,7 +356,7 @@ describe("runGrid", () => {
     expect(mrOverCap.subCalls.some((e) => e.call === "synthesizer")).toBe(true);
   });
 
-  it("(c) two trials of one (task, cap, arm) both make adapter calls — the cache never replays a trial", async () => {
+  it("two trials of one (task, cap, arm) both make adapter calls — the cache never replays a trial", async () => {
     const { fetch, state } = makeScriptedFetch();
     const dataDir = tempRoot();
     const results = await runGrid({
@@ -398,7 +388,7 @@ describe("runGrid", () => {
     expect(dir1).not.toBe(dir2);
   });
 
-  it("(c') the uncapped arm honors --trials: N runs per task, distinct per-run dirs", async () => {
+  it("the uncapped arm honors --trials: N runs per task, distinct per-run dirs", async () => {
     const { fetch, state } = makeScriptedFetch();
     const dataDir = tempRoot();
     const results = await runGrid({
@@ -420,7 +410,7 @@ describe("runGrid", () => {
     }
   });
 
-  it("(d) observes the concurrency bound: peak in-flight runs stays within the bound", async () => {
+  it("observes the concurrency bound: peak in-flight runs stays within the bound", async () => {
     // tinyTask is always under cap → the solo-hierarchy arm is EXACTLY one
     // adapter call per run, so in-flight chats == in-flight runs.
     const bound2 = makeScriptedFetch({ delayMs: 25 });
@@ -453,7 +443,7 @@ describe("runGrid", () => {
     expect(bound1.state.peakInFlight).toBeLessThanOrEqual(1); // a serial pool also stays at its bound
   });
 
-  it('(e) records error:"timeout" when a run hangs past the wall-clock guard', async () => {
+  it('records error:"timeout" when a run hangs past the wall-clock guard', async () => {
     const { fetch } = makeScriptedFetch({ hang: true });
     const results = await runGrid({
       tasks: [tinyTask("hangs")],
@@ -794,7 +784,7 @@ describe("report", () => {
 });
 
 // --------------------------------------------------------------------------
-// The real task suites (integration — ran only when tasks/ has landed)
+// The real task suites (integration)
 // --------------------------------------------------------------------------
 
 describe("loadTasks (real suite)", () => {
@@ -804,7 +794,7 @@ describe("loadTasks (real suite)", () => {
       tasks = await loadTasks();
     } catch (error) {
       throw new Error(
-        `tasks/ has landed but the rig cannot load it — loader or suite is broken: ${String(error)}`,
+        `the rig cannot load the suites — loader or suite is broken: ${String(error)}`,
       );
     }
     expect(tasks.length).toBeGreaterThan(0);
@@ -828,11 +818,11 @@ describe("loadTasks (real suite)", () => {
 });
 
 // --------------------------------------------------------------------------
-// CLI: arg parsing, task selection, dry-run (g), config honesty
+// CLI: arg parsing, task selection, dry-run, config honesty
 // --------------------------------------------------------------------------
 
 describe("parseArgs + selectTasks", () => {
-  it("defaults match the brief", () => {
+  it("defaults match the documented usage", () => {
     const opts = parseArgs([]);
     expect(opts.caps).toEqual([2000, 4000, 6000, 8000]);
     expect(opts.arms).toEqual(["fleet", "map-reduce", "solo-hierarchy", "truncation", "question-only"]);
@@ -859,7 +849,7 @@ describe("parseArgs + selectTasks", () => {
 });
 
 describe("main (CLI)", () => {
-  it("(g) --dry-run prints plan + inventory, reads no config, touches no adapter", async () => {
+  it("--dry-run prints plan + inventory, reads no config, touches no adapter", async () => {
     const lines: string[] = [];
     let configLoads = 0;
     let taskLoads = 0;
