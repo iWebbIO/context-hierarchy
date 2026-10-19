@@ -4,15 +4,22 @@
     "noEmit": true,
     "rootDir": ".",
     "paths": {
-      "@context-hierarchy/core": ["./packages/core/src/index.ts"],
-      "@context-hierarchy/proxy": ["./packages/proxy/src/index.ts"],
-      "@context-hierarchy/benchmark": ["./packages/benchmark/src/index.ts"]
+      "@context-hierarchy/core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@context-hierarchy/proxy": [
+        "./packages/proxy/src/index.ts"
+      ],
+      "@context-hierarchy/benchmark": [
+        "./packages/benchmark/src/index.ts"
+      ]
     }
   },
   "include": [
     "packages/core/src",
     "packages/proxy/src",
     "packages/benchmark/src",
-    "packages/cli/src"
+    "packages/cli/src",
+    "packages/benchmark/tasks"
   ]
 }
