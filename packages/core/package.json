@@ -1,5 +1,8 @@
 {
   "name": "@context-hierarchy/core",
   "type": "module",
-  "main": "dist/index.js"
+  "main": "dist/index.js",
+  "dependencies": {
+    "js-tiktoken": "^1.0.21"
+  }
 }
