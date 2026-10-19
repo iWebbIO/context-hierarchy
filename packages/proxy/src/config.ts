@@ -9,6 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseEnvFile } from "@context-hierarchy/core";
 
 /** Context-fitting strategy the proxy's engine runs. */
 export type StrategyName = "hierarchy" | "truncation";
@@ -36,35 +37,17 @@ export interface ProxyConfig {
 }
 
 /**
- * Minimal `KEY=VALUE` line parser for `.env` (same dialect as the core live
- * smoke test): blank lines and `#` comments skipped, surrounding whitespace
- * trimmed, matching single/double quotes stripped. A missing file is not an
- * error — it just contributes nothing.
+ * Read the `.env` file at `path` — the shared core parser (blank lines and
+ * `#` comments skipped, surrounding whitespace trimmed, matching single/
+ * double quotes stripped). A missing file is not an error — it just
+ * contributes nothing.
  */
-function parseEnvFile(path: string): Record<string, string> {
-  let raw: string;
+function parseEnvFileAt(path: string): Record<string, string> {
   try {
-    raw = readFileSync(path, "utf8");
+    return parseEnvFile(readFileSync(path, "utf8"));
   } catch {
     return {};
   }
-  const out: Record<string, string> = {};
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
-      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
-    ) {
-      value = value.slice(1, -1);
-    }
-    out[key] = value;
-  }
-  return out;
 }
 
 /** Parse a non-negative integer env value; absent → `fallback`. */
@@ -95,7 +78,7 @@ function requiredEnv(value: string | undefined, key: string): string {
  * the real environment.
  */
 export function loadConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
-  const fileEnv = parseEnvFile(join(process.cwd(), ".env"));
+  const fileEnv = parseEnvFileAt(join(process.cwd(), ".env"));
   const env = (key: string): string | undefined =>
     process.env[key] !== undefined ? process.env[key] : fileEnv[key];
 

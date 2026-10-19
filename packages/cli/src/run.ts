@@ -28,7 +28,8 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadConfig, startProxy } from "@context-hierarchy/proxy";
 import type { ProxyConfig } from "@context-hierarchy/proxy";
-import type { ProviderAdapter, SubCallEvent } from "@context-hierarchy/core";
+import { hostOf, ProviderAdapter } from "@context-hierarchy/core";
+import type { SubCallEvent } from "@context-hierarchy/core";
 import { buildEngineStack } from "./engine-stack.js";
 import { formatSubCallSummary } from "./ask-print.js";
 
@@ -153,14 +154,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 // config — the effective config, key masked, host only.
 // ---------------------------------------------------------------------------
 
-/** Upstream HOST for display (never the full URL, never anything with a key). */
-function upstreamHost(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return "(unparseable upstream URL)";
-  }
-}
+// upstreamHost is the shared core helper hostOf (env-file.ts): host only for
+// display, never the full URL, never anything with a key.
 
 /**
  * The `ctxh config` lines: upstream host (host only), model, key masked as
@@ -168,7 +163,7 @@ function upstreamHost(baseUrl: string): string {
  */
 export function formatConfig(cfg: ProxyConfig): string[] {
   return [
-    `upstream host: ${upstreamHost(cfg.upstreamBaseUrl)}`,
+    `upstream host: ${hostOf(cfg.upstreamBaseUrl)}`,
     `upstream model: ${cfg.upstreamModel}`,
     `upstream api key: ${cfg.upstreamApiKey === "" ? "unset" : "set"}`,
     `proxy api key: ${cfg.proxyApiKey === "" ? "unset" : "set"}`,
@@ -262,7 +257,7 @@ async function serveCommand(port: number | undefined, io: CliIO): Promise<number
   const { url, close } = await startProxy(cfg);
   io.out(
     `ctxh serve: proxy listening on ${url} ` +
-      `(upstream host: ${upstreamHost(cfg.upstreamBaseUrl)}, model: ${cfg.upstreamModel}, ` +
+      `(upstream host: ${hostOf(cfg.upstreamBaseUrl)}, model: ${cfg.upstreamModel}, ` +
       `cap: ${cfg.capTokens} tokens, strategy: ${cfg.strategy})`,
   );
   const shutdown = (): void => {

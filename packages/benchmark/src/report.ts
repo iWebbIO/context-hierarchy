@@ -3,14 +3,18 @@
 //  - `summaryTable()`  — a markdown grid: rows are task ids, columns are
 //    arm×cap combos, cells are ✓/✗ per trial (concatenated when trials > 1)
 //    or `-` when the combo has no runs, with a per-column accuracy footer.
-//  - `metricsByArm()`  — per (arm, cap): accuracy, mean sub-call count, mean
-//    prompt tokens (sum of the run's subCalls' promptTokens ?? estimatedTokens),
-//    mean completion tokens, cost proxy (mean total tokens = prompt +
-//    completion), mean wall ms, degraded count, error count, and how many
-//    sub-call token figures fell back to the estimate (honesty).
-//  - `toMarkdown()`    — the full report with a methodology section. The
-//    upstream appears as MODEL NAME + HOST only — never the API key, never a
-//    URL carrying credentials.
+//  - `metricsByArm()`  — per (arm, cap): accuracy with Wilson 95% confidence
+//    interval, mean sub-call count, mean prompt tokens (sum of the run's
+//    subCalls' promptTokens ?? estimatedTokens), mean completion tokens, cost
+//    proxy (mean total tokens = prompt + completion), mean wall ms, degraded
+//    count, error count, and how many sub-call token figures fell back to the
+//    estimate (honesty).
+//  - `mcnemarByCap()` — paired exact McNemar (two-sided, exact binomial over
+//    the discordant pairs) comparing fleet vs truncation at each cap.
+//  - `toMarkdown()`    — the full report with a methodology section
+//    (sampling, per-call max_tokens, cap semantics, real-token tiers,
+//    statistics disclosure). The upstream appears as MODEL NAME + HOST only
+//    — never the API key, never a URL carrying credentials.
 //  - `writeReport()`   — writes `run-results.json` and `report.md` into an
 //    output directory (default `benchmark-results/`, chosen by the CLI).
 
@@ -41,6 +45,8 @@ export interface ArmMetrics {
   runs: number;
   correct: number;
   accuracy: number;
+  /** Wilson 95% two-sided confidence interval on `accuracy`. */
+  wilson: { low: number; high: number };
   meanSubCalls: number;
   meanPromptTokens: number;
   meanCompletionTokens: number;
@@ -53,13 +59,116 @@ export interface ArmMetrics {
   estimatedTokenFallbacks: number;
 }
 
-/** Host of an upstream base URL, or a placeholder when unparseable. */
-export function upstreamHostOf(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return "(unparseable host)";
+/**
+ * Wilson score interval (two-sided, 95%) for a binomial proportion — exact
+ * z=1.959963985 for 95%; hand-checkable: successes=10, n=36 → [0.1955,
+ * 0.4389]. No normal-approximation-of-the-proportion shortcut.
+ */
+export function wilsonInterval(successes: number, n: number): { low: number; high: number } {
+  if (n === 0) return { low: 0, high: 0 };
+  const z = 1.959963985;
+  const p = successes / n;
+  const denominator = 1 + (z * z) / n;
+  const center = (p + (z * z) / (2 * n)) / denominator;
+  const spread = (z * Math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n)) / denominator;
+  return { low: Math.max(0, center - spread), high: Math.min(1, center + spread) };
+}
+
+/** The exact binomial coefficient C(n, k), computed iteratively. */
+function binomialCoefficient(n: number, k: number): number {
+  const kk = Math.min(k, n - k);
+  let out = 1;
+  for (let i = 0; i < kk; i++) {
+    out = (out * (n - i)) / (i + 1);
   }
+  return out;
+}
+
+/**
+ * Two-sided EXACT binomial probability P(X = k) for X ~ Bin(n, 0.5). The
+ * doubling of tiny probabilities cannot reach Infinity until n is in the
+ * thousands (log-space would be overkill here).
+ */
+function binomialPointMass(k: number, n: number): number {
+  return binomialCoefficient(n, k) * Math.pow(0.5, n);
+}
+
+/**
+ * Paired exact McNemar test, two-sided: given b (fleet-right/truncation-
+ * wrong) and c (fleet-wrong/truncation-right) discordant pairs, the exact
+ * binomial p-value is 2 × P(X ≤ min(b,c)) for X ~ Bin(b+c, 0.5), capped at
+ * 1 — by the binomial's symmetry, P(X ≥ max(b,c)) equals P(X ≤ min(b,c)), so
+ * doubling the smaller tail is the whole two-sided sum. Hand-checkable:
+ * b=0, c=0 → p=1; b=1, c=0 → p=1; b=4, c=0 → 2×(1/16) = 0.125.
+ * The normal approximation is deliberately NOT used (it misbehaves at small
+ * discordant counts, exactly the regime benchmark grids live in).
+ */
+export function mcnemarExactPValue(b: number, c: number): number {
+  const n = b + c;
+  if (n === 0) return 1;
+  const lo = Math.min(b, c);
+  let lowerTail = 0;
+  for (let k = 0; k <= lo; k++) lowerTail += binomialPointMass(k, n);
+  return Math.min(1, 2 * lowerTail);
+}
+
+/** One McNemar comparison: fleet vs truncation at one cap. */
+export interface McNemarComparison {
+  capTokens: number | null;
+  /** Discordant pairs: fleet right / truncation wrong. */
+  fleetOnly: number;
+  /** Discordant pairs: fleet wrong / truncation right. */
+  truncationOnly: number;
+  /** Discordant total (the McNemar n); 0 pairs → p = 1 by definition. */
+  discordant: number;
+  /** Two-sided exact binomial p-value. */
+  pValue: number;
+}
+
+/**
+ * Paired exact McNemar fleet-vs-truncation per cap: pairs are matched by
+ * (task, trial); caps with no paired runs are skipped. Trials pair strictly
+ * (trial 1 with trial 1, …) — a missing partner on one side contributes no
+ * pair (and the count of unpaired runs is reported in the markdown).
+ */
+export function mcnemarByCap(results: RunResult[]): McNemarComparison[] {
+  const fleetByCap = new Map<string, RunResult[]>();
+  const truncByCap = new Map<string, RunResult[]>();
+  const capsSeen = new Set<number>();
+  for (const r of results) {
+    if (r.arm !== "fleet" && r.arm !== "truncation") continue;
+    if (r.capTokens === null) continue;
+    capsSeen.add(r.capTokens);
+    const key = `${r.taskId}@${r.capTokens}`;
+    const bucket = r.arm === "fleet" ? fleetByCap : truncByCap;
+    const list = bucket.get(key);
+    if (list === undefined) bucket.set(key, [r]);
+    else list.push(r);
+  }
+  const out: McNemarComparison[] = [];
+  for (const cap of [...capsSeen].sort((a, b) => a - b)) {
+    let fleetOnly = 0;
+    let truncationOnly = 0;
+    for (const [key, fleetRuns] of fleetByCap) {
+      if (!key.endsWith(`@${cap}`)) continue;
+      const truncRuns = truncByCap.get(key) ?? [];
+      const truncByTrial = new Map(truncRuns.map((r) => [r.trial, r] as const));
+      for (const f of fleetRuns) {
+        const t = truncByTrial.get(f.trial);
+        if (t === undefined) continue; // unpaired: no discordance contribution
+        if (f.correct && !t.correct) fleetOnly++;
+        else if (!f.correct && t.correct) truncationOnly++;
+      }
+    }
+    out.push({
+      capTokens: cap,
+      fleetOnly,
+      truncationOnly,
+      discordant: fleetOnly + truncationOnly,
+      pValue: mcnemarExactPValue(fleetOnly, truncationOnly),
+    });
+  }
+  return out;
 }
 
 /** Column key for an arm×cap combo; the uncapped reference has no cap. */
@@ -154,6 +263,7 @@ export function metricsByArm(results: RunResult[]): ArmMetrics[] {
       runs: runs.length,
       correct,
       accuracy: correct / runs.length,
+      wilson: wilsonInterval(correct, runs.length),
       meanSubCalls: mean(runs.map((r) => r.subCalls.length)),
       meanPromptTokens: mean(perRun.map((p) => p.prompt)),
       meanCompletionTokens: mean(perRun.map((p) => p.completion)),
@@ -174,6 +284,7 @@ function metricsTable(metrics: ArmMetrics[]): string {
     "Cap",
     "Runs",
     "Accuracy",
+    "Wilson 95% CI",
     "Mean sub-calls",
     "Mean prompt tokens",
     "Mean completion tokens",
@@ -194,6 +305,7 @@ function metricsTable(metrics: ArmMetrics[]): string {
         m.capTokens === null ? "—" : String(m.capTokens),
         String(m.runs),
         `${m.correct}/${m.runs} (${(m.accuracy * 100).toFixed(0)}%)`,
+        `[${(m.wilson.low * 100).toFixed(0)}%, ${(m.wilson.high * 100).toFixed(0)}%]`,
         m.meanSubCalls.toFixed(2),
         m.meanPromptTokens.toFixed(0),
         m.meanCompletionTokens.toFixed(0),
@@ -208,7 +320,108 @@ function metricsTable(metrics: ArmMetrics[]): string {
   return lines.join("\n");
 }
 
-/** The full markdown report: methodology, accuracy grid, metrics, honesty. */
+/** The McNemar section: one line per cap, with the no-significance caveat
+ *  spelled out whenever p > 0.05. */
+function mcnemarTable(comparisons: McNemarComparison[]): string {
+  if (comparisons.length === 0) {
+    return "_No caps with paired fleet + truncation runs — nothing to compare._";
+  }
+  const header = [
+    "Cap",
+    "Fleet-only right",
+    "Truncation-only right",
+    "Discordant pairs",
+    "p (exact McNemar)",
+  ];
+  const lines = [
+    `| ${header.join(" | ")} |`,
+    `| ${header.map(() => "---").join(" | ")} |`,
+  ];
+  const caveats: string[] = [];
+  for (const c of comparisons) {
+    lines.push(
+      `| ${[
+        String(c.capTokens),
+        String(c.fleetOnly),
+        String(c.truncationOnly),
+        String(c.discordant),
+        c.pValue.toFixed(4),
+      ].join(" | ")} |`,
+    );
+    if (c.pValue > 0.05) {
+      caveats.push(`cap ${c.capTokens}: no significant difference at these n (p = ${c.pValue.toFixed(4)}).`);
+    }
+  }
+  if (caveats.length > 0) {
+    lines.push("");
+    lines.push(caveats.map((c) => `- ${c}`).join("\n"));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Map every task to its uncapped arm's REAL mean prompt tokens (the sum of
+ * one run's subCalls' promptTokens ?? estimatedTokens, averaged over the
+ * uncapped runs), then bucket tasks into tiers around the synthetic suite's
+ * chars/4-style labels. Reported alongside the chars/4 labels so the tiers
+ * can be read in real tokens.
+ */
+export function realTokenTiers(
+  results: RunResult[],
+  bucketEdges: number[],
+): Map<string, string> {
+  // Mean real prompt tokens per task over the uncapped runs.
+  const promptOf = (r: RunResult): number =>
+    r.subCalls.reduce((a, e) => a + (e.promptTokens ?? e.estimatedTokens), 0);
+  const byTask = new Map<string, number[]>();
+  for (const r of results) {
+    if (r.arm !== "uncapped") continue;
+    const list = byTask.get(r.taskId);
+    if (list === undefined) byTask.set(r.taskId, [promptOf(r)]);
+    else list.push(promptOf(r));
+  }
+  const meanByTask = new Map<string, number>();
+  for (const [taskId, prompts] of byTask) {
+    meanByTask.set(taskId, prompts.reduce((a, b) => a + b, 0) / prompts.length);
+  }
+  // Tier label: the largest bucket edge the mean sits at or above (edges
+  // ascending), or "below the first edge" when it sits under all of them.
+  const labels = new Map<string, string>();
+  for (const [taskId, meanTokens] of meanByTask) {
+    let label = `< ${bucketEdges[0]}`;
+    for (const edge of bucketEdges) {
+      if (meanTokens >= edge) label = `>= ${edge}`;
+    }
+    labels.set(taskId, `${label} (mean ${Math.round(meanTokens)} prompt tokens)`);
+  }
+  return labels;
+}
+
+/** One markdown line per task: its tier label in real tokens. */
+function tierLines(results: RunResult[]): string[] {
+  const labels = realTokenTiers(results, [3000, 8000, 15000]);
+  if (labels.size === 0) return ["- No uncapped runs recorded — no real-token tier labels available."];
+  const out: string[] = [];
+  for (const [taskId, label] of labels) {
+    out.push(`- ${taskId}: ${label}`);
+  }
+  return out;
+}
+
+/** Max completion tokens observed across every run's sub-calls (evidence that
+ *  completion tokens were uncapped — reported in the methodology). */
+function maxObservedCompletionTokens(results: RunResult[]): number {
+  let max = 0;
+  for (const r of results) {
+    for (const e of r.subCalls) {
+      if (e.completionTokens !== undefined) max = Math.max(max, e.completionTokens);
+    }
+  }
+  return max;
+}
+
+/** The full markdown report: methodology, accuracy grid, metrics, statistics,
+ *  tiers, honesty. */
 export function toMarkdown(results: RunResult[], meta: ReportMeta): string {
   const sections: string[] = [];
   sections.push("# context-hierarchy M2 benchmark report");
@@ -225,6 +438,9 @@ export function toMarkdown(results: RunResult[], meta: ReportMeta): string {
         "(a bounded pool over runs — sub-calls inside a single run may still overlap, e.g. fleet workers).",
       "- Every run used a FRESH data directory: the distillate cache is defeated, so trials never replay each other, and each trial starts from the same token-accountant calibration.",
       `- Runs exceeding the ${meta.timeoutMs} ms wall-clock guard are recorded with \`error: "timeout"\` and count as incorrect.`,
+      "- Sampling: requests leave temperature, top_p and seed UNSET — every call runs on the upstream's default sampling. The rig never pins sampling parameters.",
+      "- Per-call max_tokens (the rig's only output-side knobs): planner 500, workers = their assigned slice budget (≤ 1000), reducer 1000, hierarchy condense 800; direct and synthesizer calls carry the model's default (no max_tokens set).",
+      "- The cap is PROMPT-side only: it bounds what is sent into each call. Completion tokens are uncapped — the maximum completion tokens observed across all runs is reported in the honesty notes as evidence.",
       "- Arms:",
       ...armLines.map((line) => `  ${line}`),
     ].join("\n"),
@@ -236,13 +452,41 @@ export function toMarkdown(results: RunResult[], meta: ReportMeta): string {
   sections.push("## Metrics by arm and cap");
   sections.push(metricsTable(metricsByArm(results)));
 
+  const mcnemar = mcnemarByCap(results);
+  if (mcnemar.length > 0) {
+    sections.push("## Fleet vs truncation (paired exact McNemar)");
+    sections.push(
+      [
+        "Discordant pairs are (task, trial) runs where exactly one of fleet/truncation answered correctly.",
+        "The p-value is the two-sided EXACT binomial test over the discordant pairs (normal approximation deliberately not used).",
+        "",
+        mcnemarTable(mcnemar),
+      ].join("\n"),
+    );
+  }
+
+  sections.push("## Task tiers in real tokens");
+  sections.push(
+    [
+      "Each task mapped to its uncapped arm's actual mean prompt tokens (from this run's recorded sub-call usage), bucketed by the synthetic suite's nominal tiers (~3k / ~8k / ~15k chars/4-style labels):",
+      "",
+      ...tierLines(results),
+    ].join("\n"),
+  );
+
   sections.push("## Honesty notes");
+  const maxCompletion = maxObservedCompletionTokens(results);
+  const strictGap = results.filter((r) => r.correct && !r.strictCorrect).length;
   sections.push(
     [
       "- Errors and timeouts count as incorrect; they are recorded in `run-results.json`, never silently dropped.",
       "- `Mean prompt tokens` uses each sub-call's reported usage when the upstream provided one, otherwise its pre-dispatch estimate; `Est. fallbacks` counts how many sub-call token figures are estimates rather than real usage.",
-      "- The uncapped arm runs once per task (cap-independent reference), so its column covers all tasks at no cap.",
+      "- The uncapped arm runs once per task per trial (cap-independent reference), so its column covers all tasks at no cap.",
       "- Numeric verification uses the pinned lenient digit-substring rule (expected \"5\" matches content \"15 items\"); a strict standalone-number grader ships in `verify.ts` for re-grading.",
+      "- `Accuracy` is the quote-normalized grade (matching surrounding quote pairs stripped before comparison); `strictCorrect` in `run-results.json` holds the raw grade — "
+        + `${strictGap} run(s) were correct only after quote normalization.`,
+      "- Wilson 95% intervals are score intervals on each accuracy; at small n they are wide, and accuracy differences inside them are not evidence.",
+      `- Completion tokens were uncapped: the maximum completion tokens observed across all runs was ${maxCompletion}.`,
       "- Synthetic tasks are contamination-proof by construction; coding tasks are comprehension-only in M2 — no patch is applied or executed.",
       "- Degraded runs are the engine's honest fallback path (one fitted direct call after a fleet failure), marked per run.",
     ].join("\n"),

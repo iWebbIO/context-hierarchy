@@ -97,6 +97,32 @@ describe("Telemetry", () => {
     // non-flagged events in the previous test carry no `degraded` key).
   });
 
+  it("logSubCall records degradedReason when the event carries it (the why, not just the flag)", () => {
+    const dir = tempDir("ctxh-telemetry-test-");
+    const telemetry = new Telemetry(join(dir, "telemetry.jsonl"));
+
+    telemetry.logSubCall({
+      call: "direct",
+      estimatedTokens: 540,
+      promptTokens: 500,
+      completionTokens: 40,
+      latencyMs: 30,
+      cacheHit: false,
+      degraded: true,
+      degradedReason: "upstream fleet call failed (scripted)",
+    });
+    telemetry.logSubCall({
+      call: "direct",
+      estimatedTokens: 100,
+      latencyMs: 5,
+      cacheHit: false,
+    });
+
+    const entries = telemetry.entries() as Array<Record<string, unknown>>;
+    expect(entries[0].degradedReason).toBe("upstream fleet call failed (scripted)");
+    expect(entries[1].degradedReason).toBeUndefined(); // absent on non-degraded events
+  });
+
   it("writes real files (append-only, one JSON object per line)", () => {
     const dir = tempDir("ctxh-telemetry-test-");
     const telemetry = new Telemetry(join(dir, "telemetry.jsonl"));

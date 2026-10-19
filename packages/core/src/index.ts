@@ -22,3 +22,5 @@ export { EngineSpillStore } from "./engine-spill-store.js";
 export type { EngineSpillEntry, EngineSpillRecord } from "./engine-spill-store.js";
 export { FleetEngine, InternalCapViolation } from "./fleet-engine.js";
 export type { FleetEngineConfig, SubCallEvent } from "./fleet-engine.js";
+export { parseEnvFile } from "./env-file.js";
+export { hostOf } from "./env-file.js";

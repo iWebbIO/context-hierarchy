@@ -13,13 +13,14 @@
 // progress lines carry the host and model name only.
 
 import { pathToFileURL } from "node:url";
+import { hostOf } from "@context-hierarchy/core";
 import { loadConfig } from "@context-hierarchy/proxy";
 import type { ProxyConfig } from "@context-hierarchy/proxy";
 import { ARM_NAMES } from "./arms.js";
 import type { ArmName } from "./arms.js";
 import { DEFAULT_TIMEOUT_MS, runGrid } from "./runner.js";
 import type { ReportMeta } from "./report.js";
-import { summaryTable, upstreamHostOf, writeReport } from "./report.js";
+import { summaryTable, writeReport } from "./report.js";
 import { loadTasks } from "./tasks.js";
 import type { BenchmarkTask } from "./types.js";
 
@@ -39,8 +40,8 @@ const USAGE = `usage: run.js [flags]
 
   --caps <list>      comma-separated token caps (default 2000,4000,6000,8000)
   --arms <list>      comma-separated arms: ${ARM_NAMES.join(", ")}
-                     (default fleet,map-reduce,solo-hierarchy,truncation; add
-                     uncapped for the no-cap reference arm)
+                     (default fleet,map-reduce,solo-hierarchy,truncation,
+                     question-only; add uncapped for the no-cap reference arm)
   --trials <n>       trials per (task, cap, arm) (default 1)
   --concurrency <n>  grid runs in flight at once (default 2)
   --tasks <ids|all>  comma-separated task ids, or all (default all)
@@ -65,7 +66,7 @@ function excerpt(text: string, maxChars: number): string {
 export function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = {
     caps: [2000, 4000, 6000, 8000],
-    arms: ["fleet", "map-reduce", "solo-hierarchy", "truncation"],
+    arms: ["fleet", "map-reduce", "solo-hierarchy", "truncation", "question-only"],
     trials: 1,
     concurrency: 2,
     taskIds: "all",
@@ -202,7 +203,10 @@ export async function main(argv: string[], deps: RunDeps = {}): Promise<number> 
 
   const cappedArms = opts.arms.filter((a) => a !== "uncapped");
   const uncapped = opts.arms.includes("uncapped");
-  const runsPerTask = cappedArms.length * opts.caps.length * opts.trials + (uncapped ? 1 : 0);
+  // Capped cells: arms × caps × trials. The uncapped reference is
+  // cap-independent but trial-dependent: one run per task per trial.
+  const runsPerTask =
+    cappedArms.length * opts.caps.length * opts.trials + (uncapped ? opts.trials : 0);
   const totalRuns = selected.length * runsPerTask;
 
   if (opts.dryRun) {
@@ -211,7 +215,7 @@ export async function main(argv: string[], deps: RunDeps = {}): Promise<number> 
     say(`arms: ${opts.arms.join(", ")}`);
     say(`caps: ${opts.caps.join(", ")}`);
     say(`trials: ${opts.trials}, concurrency: ${opts.concurrency}`);
-    say(`runs: ${totalRuns} (${selected.length} task(s) × ${runsPerTask}; uncapped once per task)`);
+    say(`runs: ${totalRuns} (${selected.length} task(s) × ${runsPerTask}; uncapped once per task per trial)`);
     say(`task inventory (${selected.length} selected):`);
     for (const task of selected) {
       const notes = task.notes ? ` notes: ${excerpt(task.notes, 60)}` : "";
@@ -254,7 +258,7 @@ export async function main(argv: string[], deps: RunDeps = {}): Promise<number> 
   const meta: ReportMeta = {
     generatedAt: new Date().toISOString(),
     model: cfg.upstreamModel,
-    upstreamHost: upstreamHostOf(cfg.upstreamBaseUrl),
+    upstreamHost: hostOf(cfg.upstreamBaseUrl),
     arms: opts.arms,
     caps: opts.caps,
     trials: opts.trials,
@@ -279,14 +283,12 @@ const invokedAsEntry =
 if (invokedAsEntry) {
   // Register the tasks `.js`→`.ts` resolve hook (see src/tasks-esm-hooks.ts)
   // BEFORE the first dynamic import of the task suites. Plain Node needs it;
-  // vitest never reaches this branch. On a Node without module.register the
-  // registration is skipped and the loader surfaces its honest error.
-  try {
-    const { register } = await import("node:module");
-    register(new URL("./tasks-esm-hooks.js", import.meta.url));
-  } catch {
-    // unreachable on the supported runtimes; kept for exotic loaders
-  }
+  // vitest never reaches this branch. A registration failure (a Node without
+  // module.register, or an exotic loader) surfaces honestly: the CLI's own
+  // error handling reports it instead of dying later with an unexplained
+  // ERR_MODULE_NOT_FOUND from the first task-suite import.
+  const { register } = await import("node:module");
+  register(new URL("./tasks-esm-hooks.js", import.meta.url));
   main(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

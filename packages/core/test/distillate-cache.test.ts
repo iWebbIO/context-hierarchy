@@ -35,17 +35,27 @@ const DISTILLATE: Distillate = {
 };
 
 describe("DistillateCache", () => {
-  it("keyFor is the sha256 hex of JSON.stringify({ messages, capTokens, model })", () => {
+  it("keyFor is the sha256 hex of JSON.stringify({ messages, capTokens, model, tools, temperature, max_tokens })", () => {
     const { cache } = makeCache();
     const expected = createHash("sha256")
-      .update(JSON.stringify({ messages: MESSAGES, capTokens: 512, model: "m1" }), "utf8")
+      .update(
+        JSON.stringify({
+          messages: MESSAGES,
+          capTokens: 512,
+          model: "m1",
+          tools: undefined,
+          temperature: undefined,
+          max_tokens: undefined,
+        }),
+        "utf8",
+      )
       .digest("hex");
     const key = cache.keyFor(MESSAGES, 512, "m1");
     expect(key).toBe(expected);
     expect(key).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("keys differ across messages, capTokens, and model", () => {
+  it("keys differ across messages, capTokens, model, tools, temperature, max_tokens", () => {
     const { cache } = makeCache();
     const base = cache.keyFor(MESSAGES, 512, "m1");
     expect(cache.keyFor(MESSAGES, 513, "m1")).not.toBe(base);
@@ -53,6 +63,12 @@ describe("DistillateCache", () => {
     expect(
       cache.keyFor([...MESSAGES, { role: "user", content: "one more" }], 512, "m1"),
     ).not.toBe(base);
+    // The answer-changing request params are part of the key.
+    expect(
+      cache.keyFor(MESSAGES, 512, "m1", { tools: [{ type: "function" }] }),
+    ).not.toBe(base);
+    expect(cache.keyFor(MESSAGES, 512, "m1", { temperature: 0.2 })).not.toBe(base);
+    expect(cache.keyFor(MESSAGES, 512, "m1", { max_tokens: 100 })).not.toBe(base);
     // Same input twice → same key (content addressing is deterministic).
     expect(cache.keyFor(MESSAGES, 512, "m1")).toBe(base);
   });

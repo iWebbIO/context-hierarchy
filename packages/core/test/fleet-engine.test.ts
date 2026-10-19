@@ -545,6 +545,36 @@ describe("FleetEngine.run", () => {
     expect(fake.calls.length).toBe(callsAfterFirst + 4);
   });
 
+  it("(d-tools) identical messages but different tools do NOT share a cache entry", async () => {
+    // The key covers tools (and temperature/max_tokens): a request that would
+    // get a different answer must never replay the other's distillate.
+    const tools = [{ type: "function", function: { name: "get_weather", parameters: {} } }];
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
+    const messages = conversation(8, 100);
+    const { engine, dataDir, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const first = await engine.run({ model: MODEL, messages, tools });
+    expect(first.content).toBe("synthesized fleet answer");
+    const callsAfterFirst = fake.calls.length;
+
+    // Same messages, DIFFERENT tools → a different key → a fresh fleet run.
+    const otherTools = [{ type: "function", function: { name: "get_time", parameters: {} } }];
+    const second = await engine.run({ model: MODEL, messages, tools: otherTools });
+    expect(second.content).toBe("synthesized fleet answer");
+    expect(fake.calls.length).toBe(callsAfterFirst + 4); // full fleet, no replay
+
+    // Same tools again → the cached distillate replays with zero calls.
+    const replay = await engine.run({ model: MODEL, messages, tools });
+    expect(replay.content).toBe("synthesized fleet answer");
+    expect(fake.calls.length).toBe(callsAfterFirst + 4); // unchanged — cache hit
+
+    // And the two tool variants landed in DIFFERENT cache files.
+    const { readdirSync } = await import("node:fs");
+    const files = readdirSync(join(dataDir, "cache"));
+    expect(files.length).toBe(2);
+  });
+
   it("(f) a worker slice that overflows the cap is strategy-fitted, never a nested fleet", async () => {
     // The planner assigns the ENTIRE middle to one worker → the slice alone
     // overflows the cap → the dispatch funnel must fit it before dispatch.
@@ -572,6 +602,33 @@ describe("FleetEngine.run", () => {
     for (const m of worker.messages.slice(0, -1)) {
       expect(originals.has(JSON.stringify(m))).toBe(true);
     }
+  });
+
+  it("(synth-params) the synthesizer dispatch carries the user's tools, tool_choice, temperature, max_tokens", async () => {
+    const fake = new FakeAdapter(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
+    const messages = conversation(8, 100);
+    const { engine } = makeHarness({ adapter: fake, capTokens: CAP });
+    const tools = [{ type: "function", function: { name: "noop", parameters: {} } }];
+
+    await engine.run({
+      model: MODEL,
+      messages,
+      tools,
+      tool_choice: "auto",
+      temperature: 0.3,
+      max_tokens: 777,
+    });
+
+    const synth = fake.calls.find((c) => callRole(c) === "synthesizer") as ChatParams;
+    expect(synth.tools).toEqual(tools);
+    expect(synth.tool_choice).toBe("auto");
+    expect(synth.temperature).toBe(0.3);
+    expect(synth.max_tokens).toBe(777);
+    // The planner/worker calls keep the ENGINE's own budgets (not the user's).
+    const planner = fake.calls.find((c) => callRole(c) === "planner") as ChatParams;
+    expect(planner.max_tokens).toBe(500);
+    const worker = fake.calls.find((c) => callRole(c) === "worker") as ChatParams;
+    expect(worker.max_tokens).toBe(200);
   });
 
   it("(g) degradation: fleet-role failures → one direct call, result marked degraded", async () => {
@@ -610,7 +667,8 @@ describe("FleetEngine.run", () => {
     expect(accountant.estimate(direct.messages, MODEL)).toBeLessThanOrEqual(cap);
     expect(direct.messages).not.toEqual(messages);
 
-    // Only the completed direct call emitted an event — flagged degraded.
+    // Only the completed direct call emitted an event — flagged degraded,
+    // with the WHY (the scripted fleet failure's message).
     expect(events).toEqual([
       {
         call: "direct",
@@ -618,9 +676,37 @@ describe("FleetEngine.run", () => {
         latencyMs: expect.any(Number),
         cacheHit: false,
         degraded: true,
+        degradedReason: expect.any(String),
       },
     ]);
     expect(events[0].estimatedTokens).toBeLessThanOrEqual(cap);
+    expect(events[0].degradedReason).toContain("upstream fleet call failed (scripted)");
+    expect(events[0].degradedReason!.length).toBeLessThanOrEqual(200);
+  });
+
+  it("(signal) an engine-level signal reaches EVERY adapter dispatch (direct through synthesizer)", async () => {
+    // The fake records the signal each call carried; the engine must thread
+    // the caller's signal to planner, workers and synthesizer alike.
+    const seenSignals: (AbortSignal | undefined)[] = [];
+    class RecordingFake extends FakeAdapter {
+      async chat(p: ChatParams): Promise<ChatResult> {
+        seenSignals.push(p.signal);
+        return super.chat(p);
+      }
+    }
+    const fake = new RecordingFake(fleetScript({ plannerContent: HAPPY_PLAN }), () => []);
+    const messages = conversation(8, 100);
+    const { engine, accountant } = makeHarness({ adapter: fake, capTokens: CAP });
+    assertOverCap(accountant, messages);
+
+    const controller = new AbortController();
+    await engine.run({ model: MODEL, messages, signal: controller.signal });
+
+    expect(fake.calls.length).toBe(4); // planner + 2 workers + synthesizer
+    expect(seenSignals).toHaveLength(4);
+    for (const signal of seenSignals) {
+      expect(signal).toBe(controller.signal); // the SAME signal object, not a copy
+    }
   });
 
   it("(h) onSubCall events carry the correct call labels and fields", async () => {
@@ -918,11 +1004,14 @@ describe("FleetEngine.stream", () => {
     expect(directCalls.length).toBe(1);
     expect(accountant.estimate(directCalls[0].messages, MODEL)).toBeLessThanOrEqual(CAP);
 
-    // The sub-call telemetry event carries the degraded flag (constraint 10).
+    // The sub-call telemetry event carries the degraded flag (constraint 10)
+    // and the failure's message as degradedReason (here: the planner-path
+    // chat failure that sank the fleet before anything streamed).
     const degradedEvents = events.filter((e) => e.degraded === true);
     expect(degradedEvents.length).toBe(1);
     expect(degradedEvents[0].call).toBe("direct");
     expect(degradedEvents[0].promptTokens).toBe(7);
+    expect(degradedEvents[0].degradedReason).toContain("fleet fails before first yield (scripted)");
   });
 
   it("(g-stream') a degraded stream that ends without a finish gets a synthesized degraded finish", async () => {

@@ -89,7 +89,7 @@ export class TokenAccountant {
   estimate(messages: ChatMessage[], model?: string): number {
     let raw = 0;
     for (const message of messages) {
-      raw += Math.ceil(countTokens(message.content ?? "")) + MESSAGE_OVERHEAD;
+      raw += Math.ceil(countTokens(message.content)) + MESSAGE_OVERHEAD;
       if (message.tool_calls) {
         for (const call of message.tool_calls) {
           raw += TOOL_CALL_OVERHEAD + Math.ceil(countTokens(call.function.arguments));

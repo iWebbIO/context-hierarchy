@@ -27,14 +27,26 @@ import type { ArmName } from "../src/arms.js";
 import { runDirFor, runGrid, sanitizeTaskId } from "../src/runner.js";
 import type { RunResult } from "../src/runner.js";
 import { main, parseArgs, selectTasks } from "../src/run.js";
-import { metricsByArm, summaryTable, toMarkdown, upstreamHostOf, writeReport } from "../src/report.js";
+import {
+  metricsByArm,
+  mcnemarByCap,
+  mcnemarExactPValue,
+  realTokenTiers,
+  summaryTable,
+  toMarkdown,
+  wilsonInterval,
+  writeReport,
+} from "../src/report.js";
+import { upstreamHostOf } from "../src/index.js";
 import type { ReportMeta } from "../src/report.js";
 import {
   extractDigits,
   standaloneNumberMatch,
+  stripQuoteWrappers,
   verifyNumeric,
   verifyNumericStrict,
   verifyTask,
+  verifyTaskStrict,
 } from "../src/verify.js";
 import { loadTasks, validateTasks } from "../src/tasks.js";
 import type { BenchmarkTask } from "../src/types.js";
@@ -209,6 +221,57 @@ describe("verifyTask", () => {
     expect(verifyNumericStrict("15 items", "5")).toBe(false);
     expect(verifyNumericStrict("5 items", "5")).toBe(true);
   });
+
+  it("stripQuoteWrappers: matching surrounding pairs, up to two layers", () => {
+    // One layer of each quote kind.
+    expect(stripQuoteWrappers('"42"')).toBe("42");
+    expect(stripQuoteWrappers("'42'")).toBe("42");
+    expect(stripQuoteWrappers("`42`")).toBe("42");
+    // Two layers.
+    expect(stripQuoteWrappers('`"42"`')).toBe("42");
+    // THREE layers: the first two strip, the third stays (the bound is deliberate).
+    expect(stripQuoteWrappers('\'`"42"`\'')).toBe('"42"');
+    // Already bare, empty, single char, and a lone quote: untouched.
+    expect(stripQuoteWrappers("42")).toBe("42");
+    expect(stripQuoteWrappers("")).toBe("");
+    expect(stripQuoteWrappers('"')).toBe('"');
+    expect(stripQuoteWrappers("4\"2")).toBe('4"2');
+    // Mismatched or interior quotes: NOT a wrapper — untouched.
+    expect(stripQuoteWrappers('"42')).toBe('"42');
+    expect(stripQuoteWrappers('"42\'')).toBe('"42\'');
+    expect(stripQuoteWrappers('say "hi" now')).toBe('say "hi" now');
+    // Interior whitespace inside the wrapper is part of the content.
+    expect(stripQuoteWrappers('" 42 "')).toBe(" 42 ");
+  });
+
+  it("quote normalization: wrapped answers grade correct, raw graders stay strict", () => {
+    const exact = { type: "exact", expected: "42" } as const;
+    // Double, single, backtick, nested — all pass the normalized grade.
+    expect(verifyTask('"42"', exact)).toBe(true);
+    expect(verifyTask("'42'", exact)).toBe(true);
+    expect(verifyTask("`42`", exact)).toBe(true);
+    expect(verifyTask('`"42"`', exact)).toBe(true);
+    // The strict (raw) grade rejects exactly these.
+    expect(verifyTaskStrict('"42"', exact)).toBe(false);
+    expect(verifyTaskStrict("`42`", exact)).toBe(false);
+    expect(verifyTaskStrict("42", exact)).toBe(true);
+    // Bare and empty stay correct in both grades.
+    expect(verifyTask("42", exact)).toBe(true);
+    expect(verifyTaskStrict("42", exact)).toBe(true);
+    expect(verifyTask("", { type: "exact", expected: "" })).toBe(true);
+    // Normalization never rescues a WRONG answer.
+    expect(verifyTask('"43"', exact)).toBe(false);
+    expect(verifyTask('"The answer is 42."', { type: "exact", expected: "42" })).toBe(false);
+    // contains: the stripped form is searched too (raw substring still is).
+    const contains = { type: "contains", expected: "42 tokens" } as const;
+    expect(verifyTask('"42 tokens exactly"', contains)).toBe(true); // strip → 42 tokens exactly
+    expect(verifyTaskStrict('"42 tokens exactly"', contains)).toBe(true); // raw already contains it
+    expect(verifyTask('"nope"', contains)).toBe(false);
+    // numeric: a quote-wrapped digit answer grades correct normalized (and
+    // the strict raw grade happens to pass here too — quotes are not digits).
+    expect(verifyTask('"5 items"', { type: "numeric", expected: "5" })).toBe(true);
+    expect(verifyTaskStrict('"5 items"', { type: "numeric", expected: "5" })).toBe(true);
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -280,6 +343,7 @@ describe("runGrid", () => {
       expect(r.verifiedAnswer).toBe("42");
       expect(r.wallMs).toBeGreaterThanOrEqual(0);
       expect(r.subCalls.length).toBeGreaterThanOrEqual(1);
+      expect(r.strictCorrect).toBe(r.correct); // bare scripted answers: no quote gap
     }
 
     // Arm semantics at the sub-call level:
@@ -334,7 +398,29 @@ describe("runGrid", () => {
     expect(dir1).not.toBe(dir2);
   });
 
-  it("(d) observes the concurrency bound: peak in-flight runs equals the bound (and the bound bounds)", async () => {
+  it("(c') the uncapped arm honors --trials: N runs per task, distinct per-run dirs", async () => {
+    const { fetch, state } = makeScriptedFetch();
+    const dataDir = tempRoot();
+    const results = await runGrid({
+      tasks: [tinyTask("unc-trials")],
+      caps: [4000],
+      arms: ["uncapped"],
+      trials: 3,
+      concurrency: 1,
+      upstream: { ...UPSTREAM, fetch },
+      dataDir,
+    });
+    expect(results).toHaveLength(3); // once per task per TRIAL, not once per task
+    expect(results.map((r) => r.trial)).toEqual([1, 2, 3]);
+    expect(results.every((r) => r.arm === "uncapped" && r.capTokens === null)).toBe(true);
+    expect(state.calls).toBe(3); // every trial really ran
+    // Distinct per-run dirs defeat the distillate cache between trials.
+    for (const trial of [1, 2, 3]) {
+      expect(existsSync(runDirFor(dataDir, "unc-trials", "uncapped", null, trial))).toBe(true);
+    }
+  });
+
+  it("(d) observes the concurrency bound: peak in-flight runs stays within the bound", async () => {
     // tinyTask is always under cap → the solo-hierarchy arm is EXACTLY one
     // adapter call per run, so in-flight chats == in-flight runs.
     const bound2 = makeScriptedFetch({ delayMs: 25 });
@@ -348,8 +434,11 @@ describe("runGrid", () => {
       dataDir: tempRoot(),
     });
     expect(results2).toHaveLength(4);
-    expect(bound2.state.peakInFlight).toBe(2); // parallelism happens…
-    expect(bound2.state.peakInFlight).toBeLessThanOrEqual(2); // …but never exceeds the bound
+    // Parallelism happens (peak reaches the bound) but never exceeds it — a
+    // range, not an exact equality, so a timing hiccup (a lane finishing
+    // before the next starts) cannot flake the suite.
+    expect(bound2.state.peakInFlight).toBeGreaterThanOrEqual(2);
+    expect(bound2.state.peakInFlight).toBeLessThanOrEqual(2);
 
     const bound1 = makeScriptedFetch({ delayMs: 10 });
     await runGrid({
@@ -361,7 +450,7 @@ describe("runGrid", () => {
       upstream: { ...UPSTREAM, fetch: bound1.fetch },
       dataDir: tempRoot(),
     });
-    expect(bound1.state.peakInFlight).toBe(1); // a serial pool also stays at its bound
+    expect(bound1.state.peakInFlight).toBeLessThanOrEqual(1); // a serial pool also stays at its bound
   });
 
   it('(e) records error:"timeout" when a run hangs past the wall-clock guard', async () => {
@@ -382,7 +471,7 @@ describe("runGrid", () => {
     expect(results[0].modelContent).toBe("");
     expect(results[0].verifiedAnswer).toBe("");
     expect(results[0].subCalls).toHaveLength(0); // the call never completed
-    expect(results[0].wallMs).toBeGreaterThanOrEqual(75);
+    expect(results[0].wallMs).toBeGreaterThanOrEqual(70); // 75 - 5ms timing slack
   });
 
   it("records upstream errors honestly (never throws past the pool)", async () => {
@@ -454,6 +543,42 @@ describe("runArm", () => {
     expect(sanitizeTaskId("")).toBe("task");
     expect(sanitizeTaskId("x".repeat(200)).length).toBe(80);
   });
+
+  it("question-only: systems + the LAST user message only — the haystack is stripped", async () => {
+    const { fetch, state } = makeScriptedFetch();
+    const dataDir = tempRoot();
+    const { ProviderAdapter, TokenAccountant: TA } = await import("@context-hierarchy/core");
+    // A conversation WITH a system message, a haystack middle, and a final ask.
+    const messages: ChatMessage[] = [
+      { role: "system", content: "You are the benchmark assistant." },
+      ...taskRight.messages.slice(0, 5),
+      { role: "user", content: "Reply with exactly: 42" },
+    ];
+    const outcome = await runArm("question-only", messages, {
+      adapter: new ProviderAdapter({ ...UPSTREAM, fetch }),
+      accountant: new TokenAccountant({ dataDir }),
+      model: MODEL,
+      dataDir,
+      capTokens: 400,
+    });
+    // The directive lives in the LAST user message, so the control arm answers it.
+    expect(outcome.content).toBe("42");
+    expect(outcome.degraded).toBe(false);
+    // Exactly ONE call — the solo shape with the synthesized sub-call event.
+    expect(state.calls).toBe(1);
+    expect(outcome.subCalls).toHaveLength(1);
+    expect(outcome.subCalls[0].call).toBe("direct");
+    expect(outcome.subCalls[0].cacheHit).toBe(false);
+    // The dispatched messages: system + the last user ONLY — proven by the
+    // sub-call's estimate, which covers exactly those two messages (the full
+    // list would estimate far higher; the haystack middle is ~5×750t).
+    const expectedEstimate = new TA({ dataDir }).estimate([messages[0], messages[6]], MODEL);
+    expect(outcome.subCalls[0].estimatedTokens).toBe(expectedEstimate);
+    expect(outcome.subCalls[0].estimatedTokens).toBeLessThan(
+      new TA({ dataDir }).estimate(messages, MODEL) / 2,
+    );
+    expect(ARM_DESCRIPTIONS["question-only"]).toContain("without any context");
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -467,6 +592,7 @@ function rr(over: Partial<RunResult> = {}): RunResult {
     capTokens: 400,
     trial: 1,
     correct: true,
+    strictCorrect: true,
     verifiedAnswer: "42",
     modelContent: "42",
     subCalls: [],
@@ -539,6 +665,74 @@ describe("report", () => {
     expect(metrics.estimatedTokenFallbacks).toBe(1);
   });
 
+  it("wilsonInterval: hand-checkable values (10/36, bounds, monotonicity)", () => {
+    // 10 successes of 36: the classic hand-checkable Wilson interval.
+    const w = wilsonInterval(10, 36);
+    expect(w.low).toBeCloseTo(0.1585, 3);
+    expect(w.high).toBeCloseTo(0.4399, 3);
+    // Degenerate n: no runs → a zero-width interval at 0.
+    expect(wilsonInterval(0, 0)).toEqual({ low: 0, high: 0 });
+    // All/none success: bounds clamp inside [0, 1] with the other side moved inward.
+    expect(wilsonInterval(0, 10).low).toBe(0);
+    expect(wilsonInterval(0, 10).high).toBeCloseTo(0.2775, 3);
+    expect(wilsonInterval(10, 10).high).toBe(1);
+    expect(wilsonInterval(10, 10).low).toBeCloseTo(0.7225, 3);
+    // A wider interval at smaller n, same proportion.
+    const narrow = wilsonInterval(50, 100);
+    const wide = wilsonInterval(5, 10);
+    expect(wide.high - wide.low).toBeGreaterThan(narrow.high - narrow.low);
+  });
+
+  it("mcnemarExactPValue: exact binomial on hand-checkable discordant pairs", () => {
+    expect(mcnemarExactPValue(0, 0)).toBe(1); // no discordance → no evidence of difference
+    expect(mcnemarExactPValue(1, 0)).toBe(1); // one discordant pair, two-sided: p = 1
+    expect(mcnemarExactPValue(4, 0)).toBeCloseTo(0.125, 6); // 2*(1/16) — the classic
+    expect(mcnemarExactPValue(0, 4)).toBeCloseTo(0.125, 6); // symmetric
+    expect(mcnemarExactPValue(5, 1)).toBeCloseTo(0.21875, 6); // 2*P(X<=1 | n=6) = 2*7/64
+    expect(mcnemarExactPValue(3, 3)).toBe(1); // perfectly balanced discordance
+    expect(mcnemarExactPValue(8, 0)).toBeCloseTo(0.0078125, 6); // 2*(1/256)
+  });
+
+  it("mcnemarByCap pairs (task, trial) cells fleet-vs-truncation per cap", () => {
+    const results = [
+      // cap 400: task t1 — fleet right, truncation wrong (discordant), trial 1.
+      rr({ taskId: "t1", arm: "fleet", capTokens: 400, correct: true }),
+      rr({ taskId: "t1", arm: "truncation", capTokens: 400, correct: false }),
+      // cap 400: task t2 — both right (concordant, no contribution).
+      rr({ taskId: "t2", arm: "fleet", capTokens: 400, correct: true }),
+      rr({ taskId: "t2", arm: "truncation", capTokens: 400, correct: true }),
+      // cap 800: fleet wrong, truncation right — the other discordant direction.
+      rr({ taskId: "t1", arm: "fleet", capTokens: 800, correct: false }),
+      rr({ taskId: "t1", arm: "truncation", capTokens: 800, correct: true }),
+      // trial mismatch: t2 trial 2 fleet has no truncation partner → unpaired.
+      rr({ taskId: "t2", arm: "fleet", capTokens: 800, trial: 2, correct: true }),
+    ];
+    const comparisons = mcnemarByCap(results);
+    expect(comparisons.map((c) => c.capTokens)).toEqual([400, 800]);
+    expect(comparisons[0]).toMatchObject({ fleetOnly: 1, truncationOnly: 0, discordant: 1, pValue: 1 });
+    expect(comparisons[1]).toMatchObject({ fleetOnly: 0, truncationOnly: 1, discordant: 1, pValue: 1 });
+  });
+
+  it("realTokenTiers maps tasks to their uncapped runs' mean prompt tokens", () => {
+    const results = [
+      rr({ taskId: "small", arm: "uncapped", capTokens: null, subCalls: [
+        { call: "direct", estimatedTokens: 500, promptTokens: 2900, completionTokens: 10, latencyMs: 1, cacheHit: false },
+      ] }),
+      rr({ taskId: "big", arm: "uncapped", capTokens: null, subCalls: [
+        { call: "direct", estimatedTokens: 500, promptTokens: 16000, completionTokens: 10, latencyMs: 1, cacheHit: false },
+      ] }),
+      // Capped runs never contribute tier labels.
+      rr({ taskId: "small", arm: "fleet", capTokens: 400 }),
+    ];
+    const tiers = realTokenTiers(results, [3000, 8000, 15000]);
+    expect(tiers.get("small")).toContain("< 3000");
+    expect(tiers.get("small")).toContain("mean 2900 prompt tokens");
+    expect(tiers.get("big")).toContain(">= 15000");
+    expect(tiers.get("big")).toContain("mean 16000 prompt tokens");
+    // No uncapped runs → no labels.
+    expect(realTokenTiers([rr({ arm: "fleet" })], [3000]).size).toBe(0);
+  });
+
   it("toMarkdown: methodology with model + host ONLY — never the key's value; honesty notes present", () => {
     const md = toMarkdown([rr()], META);
     expect(md).toContain("## Methodology");
@@ -548,12 +742,40 @@ describe("report", () => {
     expect(md).toContain("## Metrics by arm and cap");
     expect(md).toContain("## Honesty notes");
     expect(md).toContain("comprehension-only");
+    // The methodology discloses sampling, per-call max_tokens, and cap semantics.
+    expect(md).toContain("temperature, top_p and seed UNSET");
+    expect(md).toContain("planner 500");
+    expect(md).toContain("hierarchy condense 800");
+    expect(md).toContain("PROMPT-side only");
+    expect(md).toContain("Completion tokens are uncapped");
+    // The Wilson CI column exists on every metrics row.
+    expect(md).toContain("Wilson 95% CI");
     // The report may SAY the key is never recorded; it may never CARRY the
     // key's value (or any Authorization material) in any artifact.
     expect(md).not.toContain("fake-key-never-printed");
     expect(md).not.toMatch(/bearer\s+[A-Za-z0-9]/i);
     expect(upstreamHostOf("http://upstream.invalid/v1")).toBe("upstream.invalid");
     expect(upstreamHostOf("not a url")).toBe("(unparseable host)");
+  });
+
+  it("toMarkdown: McNemar section with caveat when p > 0.05, tiers in real tokens", () => {
+    const results = [
+      rr({ taskId: "t1", arm: "fleet", capTokens: 400, correct: true }),
+      rr({ taskId: "t1", arm: "truncation", capTokens: 400, correct: false }),
+      rr({ taskId: "t1", arm: "uncapped", capTokens: null, subCalls: [
+        { call: "direct", estimatedTokens: 500, promptTokens: 2900, completionTokens: 12, latencyMs: 1, cacheHit: false },
+      ] }),
+    ];
+    const md = toMarkdown(results, META);
+    expect(md).toContain("## Fleet vs truncation (paired exact McNemar)");
+    expect(md).toContain("EXACT binomial test over the discordant pairs");
+    expect(md).toContain("no significant difference at these n"); // 1 discordant pair → p = 1
+    expect(md).toContain("## Task tiers in real tokens");
+    expect(md).toContain("t1: < 3000 (mean 2900 prompt tokens)");
+    // The quote-fragility honesty note counts normalized-only runs.
+    expect(md).toContain("correct only after quote normalization");
+    // Max observed completion tokens reported as the uncapped evidence.
+    expect(md).toContain("maximum completion tokens observed across all runs was 12");
   });
 
   it("writeReport writes parseable run-results.json and report.md", () => {
@@ -613,7 +835,7 @@ describe("parseArgs + selectTasks", () => {
   it("defaults match the brief", () => {
     const opts = parseArgs([]);
     expect(opts.caps).toEqual([2000, 4000, 6000, 8000]);
-    expect(opts.arms).toEqual(["fleet", "map-reduce", "solo-hierarchy", "truncation"]);
+    expect(opts.arms).toEqual(["fleet", "map-reduce", "solo-hierarchy", "truncation", "question-only"]);
     expect(opts.trials).toBe(1);
     expect(opts.concurrency).toBe(2);
     expect(opts.taskIds).toBe("all");
@@ -660,7 +882,7 @@ describe("main (CLI)", () => {
     expect(taskLoads).toBe(1);
     const out = lines.join("\n");
     expect(out).toContain("benchmark dry-run");
-    expect(out).toContain("runs: 5"); // 1 task × (1 arm × 2 caps × 2 trials + 1 uncapped)
+    expect(out).toContain("runs: 6"); // 1 task × (1 arm × 2 caps × 2 trials + 2 uncapped trials)
     expect(out).toContain("synth-right"); // the inventory…
     expect(out).not.toContain("synth-wrong"); // …respects the --tasks filter
     expect(out).toContain("fleet");

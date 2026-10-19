@@ -40,8 +40,9 @@
 //     truncation-fit call is owned by the engine (global constraint 10).
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { POINTER_RE } from "../engine-spill-store.js";
 import type {
   ContextStrategy,
   FitResult,
@@ -68,8 +69,8 @@ const EXCERPT_CHARS = 60;
 /** max_tokens for the single condense call (brief R1). */
 const CONDENSE_MAX_TOKENS = 800;
 
-/** Spill pointer shape: 64 lowercase hex chars + `.json`. */
-const POINTER_RE = /^[0-9a-f]{64}\.json$/;
+// The spill pointer shape is shared with the engine's spill store — imported
+// from engine-spill-store.ts (one source of truth, no second regex).
 
 /** The four spill reasons this strategy records (brief R2). */
 type HierarchySpillReason = "elided" | "condensed" | "dropped" | "middle-cut";
@@ -117,12 +118,22 @@ function spillPointerFor(m: ChatMessage): string {
   return `${createHash("sha256").update(json, "utf8").digest("hex")}.json`;
 }
 
-/** Write the spill file once; existing files are never rewritten (append-only). */
-function writeSpillFile(dataDir: string, pointer: string, m: ChatMessage): void {
-  const path = join(dataDir, "hierarchy", "spills", pointer);
-  if (existsSync(path)) return;
-  mkdirSync(join(dataDir, "hierarchy", "spills"), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(canonicalMessage(m), null, 2)}\n`, "utf8");
+/** Write the spill file once (async, open-exclusive "wx"): a same-pointer race
+ *  resolves benignly (EEXIST = the identical file is already there), and
+ *  existing files are never rewritten (append-only). */
+async function writeSpillFile(dataDir: string, pointer: string, m: ChatMessage): Promise<void> {
+  const spillsDir = join(dataDir, "hierarchy", "spills");
+  await mkdir(spillsDir, { recursive: true });
+  try {
+    await writeFile(
+      join(spillsDir, pointer),
+      `${JSON.stringify(canonicalMessage(m), null, 2)}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return; // append-only, first write wins
+    throw e;
+  }
 }
 
 function isRole(v: unknown): v is Role {
@@ -186,10 +197,10 @@ export class HierarchyStrategy implements ContextStrategy {
     const { messages, budgetTokens } = input;
     const estimate = (msgs: ChatMessage[]): number =>
       ctx.accountant.estimate(msgs, ctx.model);
-    const spillEntry = (index: number, reason: HierarchySpillReason): SpilledMessage => {
+    const spillEntry = async (index: number, reason: HierarchySpillReason): Promise<SpilledMessage> => {
       const original = messages[index];
       const pointer = spillPointerFor(original);
-      writeSpillFile(ctx.dataDir, pointer, original);
+      await writeSpillFile(ctx.dataDir, pointer, original);
       return { index, message: original, reason, pointer };
     };
 
@@ -215,7 +226,7 @@ export class HierarchyStrategy implements ContextStrategy {
     if (estimate(stage1) <= budgetTokens) {
       const spill: SpilledMessage[] = [];
       for (let i = 0; i < messages.length; i++) {
-        if (stage1[i] !== messages[i]) spill.push(spillEntry(i, "elided"));
+        if (stage1[i] !== messages[i]) spill.push(await spillEntry(i, "elided"));
       }
       return { messages: stage1, spill };
     }
@@ -314,7 +325,7 @@ export class HierarchyStrategy implements ContextStrategy {
           );
         }
       }
-      spill.push(spillEntry(i, reason));
+      spill.push(await spillEntry(i, reason));
     }
     return { messages: fitted, spill };
   }
@@ -327,7 +338,7 @@ export class HierarchyStrategy implements ContextStrategy {
     const path = join(ctx.dataDir, "hierarchy", "spills", pointer);
     let raw: string;
     try {
-      raw = readFileSync(path, "utf8");
+      raw = await readFile(path, "utf8");
     } catch {
       throw new SpillRestoreError(`unknown spill pointer: ${pointer} (no spill file)`);
     }

@@ -32,6 +32,12 @@ export interface ChatParams {
   stream?: boolean;
   tools?: unknown[];
   tool_choice?: unknown;
+  /**
+   * Client-side cancellation seam: aborts the underlying fetch (and, for
+   * streams, the body reader) when it fires. Never serialized into the request
+   * body — it is a local knob, not a wire field.
+   */
+  signal?: AbortSignal;
 }
 
 /** Token usage reported by the upstream for one call. */

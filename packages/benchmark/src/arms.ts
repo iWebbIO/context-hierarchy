@@ -13,15 +13,19 @@
 //                       is the strategy's seam, not an arm sub-call.)
 //  - `truncation`     — the same single-call shape with TruncationStrategy —
 //                       the naive drop-oldest baseline.
+//  - `question-only`  — the CONTROL: system messages + the last user message
+//                       ONLY (haystack stripped), one direct call — it
+//                       catches tasks answerable without any context.
 //  - `uncapped`       — the ORIGINAL messages go to one direct call with no
 //                       cap: the reference arm. Its real prompt-token usage is
-//                       recorded; the runner executes it once per task, not
-//                       once per cap.
+//                       recorded; the runner executes it once per task per
+//                       trial, not once per cap.
 //
-// For solo-hierarchy / truncation / uncapped the single call is wrapped and a
-// synthetic `SubCallEvent { call: "direct", estimatedTokens:
-// accountant.estimate(dispatchedMessages), usage from the result, latencyMs,
-// cacheHit: false }` is recorded, so every arm reports the same sub-call shape.
+// For solo-hierarchy / truncation / question-only / uncapped the single call
+// is wrapped and a synthetic `SubCallEvent { call: "direct",
+// estimatedTokens: accountant.estimate(dispatchedMessages), usage from the
+// result, latencyMs, cacheHit: false }` is recorded, so every arm reports the
+// same sub-call shape.
 
 import {
   FleetEngine,
@@ -44,6 +48,7 @@ export const ARM_NAMES = [
   "map-reduce",
   "solo-hierarchy",
   "truncation",
+  "question-only",
   "uncapped",
 ] as const;
 
@@ -64,8 +69,10 @@ export const ARM_DESCRIPTIONS: Record<ArmName, string> = {
     "no engine: HierarchyStrategy.fit() manages the context (its own single capped condense call included), then ONE direct adapter call — the degenerate fleet-of-one",
   truncation:
     "no engine: TruncationStrategy.fit() (drop-oldest baseline; systems and the last user message preserved, middle-cut floor) then ONE direct adapter call",
+  "question-only":
+    "control: the system messages plus the LAST user message ONLY (the entire haystack stripped), one direct call — catches tasks answerable without any context",
   uncapped:
-    "reference: the ORIGINAL messages in ONE direct adapter call with no cap (run once per task, not per cap) — what doing nothing to the context costs",
+    "reference: the ORIGINAL messages in ONE direct adapter call with no cap (run once per task per trial, not per cap) — what doing nothing to the context costs",
 };
 
 /** The one config every arm is built from (brief R2). */
@@ -170,6 +177,19 @@ export async function runArm(
       return singleCallArm(new HierarchyStrategy(), messages, cfg);
     case "truncation":
       return singleCallArm(new TruncationStrategy(), messages, cfg);
+    case "question-only": {
+      // The control: every system message plus the LAST user message — the
+      // whole haystack (and every other turn) stripped. One direct call over
+      // that, synthesized sub-call like the other solo arms.
+      const system = messages.filter((m) => m.role === "system");
+      let lastUserIdx = -1;
+      for (let i = 0; i < messages.length; i++) {
+        if (messages[i].role === "user") lastUserIdx = i;
+      }
+      const dispatched: ChatMessage[] =
+        lastUserIdx >= 0 ? [...system, messages[lastUserIdx]] : system;
+      return directCall(dispatched, cfg);
+    }
     case "uncapped":
       return directCall(messages, cfg);
     default: {

@@ -786,6 +786,103 @@ describe("POST /v1/chat/completions — stream", () => {
     expect(res.body).toContain(": x-context-hierarchy-degraded: true");
     expect(res.body).toContain('"finish_reason":null');
     expect(res.body.endsWith("data: [DONE]\n\n")).toBe(true);
+    // The degraded sub-call telemetry carries the WHY (the caught failure).
+    const subcalls = h.telemetry
+      .entries()
+      .filter((e) => (e as Record<string, unknown>).kind === "subcall") as Array<
+      Record<string, unknown>
+    >;
+    const degraded = subcalls.find((e) => e.degraded === true);
+    expect(degraded).toBeDefined();
+    expect(String(degraded!.degradedReason)).toContain("scripted");
+  });
+
+  it("a client disconnect mid-stream aborts the fleet (raw socket close → engine signal)", async () => {
+    // The disconnect chain: SSE pump wires request.raw `close` to an
+    // AbortController feeding engine.stream. Simulating a disconnect through
+    // fastify.inject is not possible (inject resolves only when the response
+    // ends, and a hung stream would deadlock it first), so the test drives
+    // the REAL socket path: the server listens on 127.0.0.1 (loopback only,
+    // no upstream — the fake adapter), a real fetch client starts the SSE
+    // request, then ABORTS its side of the socket; the observable is the
+    // signal the engine handed the adapter, which must fire.
+    let released = false;
+    let observedSignal: AbortSignal | undefined;
+    class SignalFake extends FakeAdapter {
+      async *stream(params: ChatParams): AsyncGenerator<StreamEvent> {
+        this.calls.push(params);
+        observedSignal = (params as ChatParams & { signal?: AbortSignal }).signal;
+        // Hold the stream open until the abort releases it (checking the
+        // already-aborted case: an 'abort' listener never fires retroactively),
+        // then end cleanly (the engine surfaces the abort to the pump).
+        yield { type: "delta", content: "before " };
+        await new Promise<void>((resolve) => {
+          const signal = observedSignal;
+          if (signal === undefined || signal.aborted) resolve();
+          else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        released = true;
+        yield { type: "delta", content: "after" };
+      }
+    }
+    const adapter = new SignalFake(
+      () => ({ content: "unused", finishReason: "stop" }),
+      () => [],
+    );
+    const dataDir = mkdtempSync(join(tmpdir(), "ctxh-proxy-abort-"));
+    dirs.push(dataDir);
+    const telemetry = new Telemetry(join(dataDir, "telemetry.jsonl"));
+    const engine = new FleetEngine({
+      adapter: adapter as unknown as ProviderAdapter,
+      accountant: new TokenAccountant({ dataDir }),
+      strategy: new TruncationStrategy(),
+      capTokens: 6000,
+      model: MODEL,
+      dataDir,
+      onSubCall: subCallSink(telemetry),
+    });
+    const cfg: ProxyConfig = {
+      upstreamBaseUrl: "https://fake.example/v1",
+      upstreamApiKey: "unused",
+      upstreamModel: MODEL,
+      capTokens: 6000,
+      port: 0,
+      strategy: "hierarchy",
+      concurrency: 3,
+      dataDir,
+      proxyApiKey: "",
+    };
+    const app = buildServer({
+      adapter: adapter as unknown as ProviderAdapter,
+      engine,
+      telemetry,
+      cfg,
+    });
+    apps.push(app);
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.addresses()[0];
+
+    const clientAbort = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: conversation(1, 8), stream: true }),
+      signal: clientAbort.signal,
+    });
+    expect(response.status).toBe(200);
+    // Start consuming the body (the SSE pump is live), then the client hangs up.
+    const reader = response.body!.getReader();
+    await reader.read(); // the role chunk (or a delta) — the pump is mid-stream
+    clientAbort.abort();
+
+    // The disconnect reached the fleet: the engine's signal fired and the
+    // hung adapter stream was released by IT (not by the response ending).
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal!.aborted).toBe(true);
+    expect(released).toBe(true);
+    await reader.cancel().catch(() => {});
+    await app.close();
   });
 });
 

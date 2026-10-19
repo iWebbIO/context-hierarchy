@@ -7,18 +7,10 @@
 // credentials. A config error exits with the message naming the variable.
 
 import { pathToFileURL } from "node:url";
+import { hostOf } from "@context-hierarchy/core";
 import type { ProxyConfig } from "./config.js";
 import { loadConfig } from "./config.js";
 import { buildFromConfig } from "./server.js";
-
-/** Host of the upstream base URL for the startup line (best-effort). */
-function upstreamHost(baseUrl: string): string {
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return "(unparseable upstream URL)";
-  }
-}
 
 /**
  * Boot the proxy programmatically. `cfg` (a `Partial<ProxyConfig>`) overrides
@@ -55,7 +47,7 @@ if (isDirectRun()) {
     .then(({ url }) => {
       console.log(
         `context-hierarchy proxy listening on ${url} ` +
-          `(upstream: ${upstreamHost(cfg.upstreamBaseUrl)}, model: ${cfg.upstreamModel}, ` +
+          `(upstream: ${hostOf(cfg.upstreamBaseUrl)}, model: ${cfg.upstreamModel}, ` +
           `cap: ${cfg.capTokens} tokens, strategy: ${cfg.strategy})`,
       );
     })

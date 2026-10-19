@@ -18,15 +18,21 @@ export type { RunGridParams, RunResult, UpstreamConfig } from "./runner.js";
 export {
   extractDigits,
   standaloneNumberMatch,
+  stripQuoteWrappers,
   verifyNumeric,
   verifyNumericStrict,
   verifyTask,
+  verifyTaskStrict,
 } from "./verify.js";
+export { hostOf as upstreamHostOf } from "@context-hierarchy/core";
 export {
   metricsByArm,
+  mcnemarByCap,
+  mcnemarExactPValue,
+  realTokenTiers,
   summaryTable,
   toMarkdown,
-  upstreamHostOf,
+  wilsonInterval,
   writeReport,
 } from "./report.js";
-export type { ArmMetrics, ReportMeta, WrittenReport } from "./report.js";
+export type { ArmMetrics, McNemarComparison, ReportMeta, WrittenReport } from "./report.js";

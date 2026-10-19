@@ -5,43 +5,26 @@
 // The API key from .env is used only to build the Authorization header: it
 // is never logged, asserted on, or written anywhere.
 //
-// .env is parsed by hand with node:fs — no dotenv dependency (per plan).
+// .env is parsed by the shared core helper (env-file.ts) — no dotenv dep.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { ProviderAdapter } from "../src/index.js";
-
-function parseEnv(path: string): Record<string, string> {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return {}; // missing .env → skip honestly below
-  }
-  const out: Record<string, string> = {};
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
-      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
-    ) {
-      value = value.slice(1, -1);
-    }
-    out[key] = value;
-  }
-  return out;
-}
+import { parseEnvFile, ProviderAdapter } from "../src/index.js";
 
 // packages/core/test → repo root (where .env lives).
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const env = parseEnv(join(repoRoot, ".env"));
+
+/** Parsed .env, or {} when the file is missing (skip honestly below). */
+function readEnv(): Record<string, string> {
+  try {
+    return parseEnvFile(readFileSync(join(repoRoot, ".env"), "utf8"));
+  } catch {
+    return {};
+  }
+}
+const env = readEnv();
 
 const enabled =
   process.env.LIVE === "1" &&

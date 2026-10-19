@@ -1,11 +1,10 @@
-// Real-suite dry-run artifact (brief: "dry-run output of the real task
+// Real-suite dry-run test (brief: "dry-run output of the real task
 // inventory IF tasks/ has landed" — it has). This test consumes the REAL
-// task suites through the shipped loader and prints the exact pre-flight
-// output the CLI would print, asserting the grid-plan math on the way.
+// task suites through the shipped loader and asserts the exact pre-flight
+// behavior, including the grid-plan math on the way.
 //
 // Still no network, no .env: --dry-run resolves no configuration and makes no
-// model calls (that is the assertion that matters — the print is the
-// artifact).
+// model calls (that is the assertion that matters).
 
 import { describe, expect, it } from "vitest";
 import { main } from "../src/run.js";
@@ -44,7 +43,5 @@ describe("real-suite dry-run", () => {
     for (const task of tasks) {
       expect(out).toContain(task.id);
     }
-    // The printed artifact (the pre-flight echo this test exists to produce):
-    console.log(`\n--- dry-run over the real suite (${tasks.length} tasks) ---\n${out}\n--- end dry-run ---`);
   });
 });

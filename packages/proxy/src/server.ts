@@ -26,7 +26,7 @@
 // throws into request handling.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import { join } from "node:path";
 import Fastify from "fastify";
@@ -286,6 +286,17 @@ function parseChatBody(body: unknown, cfg: ProxyConfig): ParsedChatBody {
   return { params, stream: Boolean(b.stream), includeUsage };
 }
 
+/** Constant-time Bearer-token check: both sides sha256-hashed to a fixed
+ *  length (equal-length buffers), then timingSafeEqual — never a `!==` on
+ *  the secret, whose early-exit length/path leaks timing. */
+function bearerMatches(provided: string | undefined, expected: string): boolean {
+  if (typeof provided !== "string" || !provided.startsWith("Bearer ")) return false;
+  const token = provided.slice("Bearer ".length);
+  const a = createHash("sha256").update(token, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(a, b);
+}
+
 /** Build the Fastify server with all routes and hooks wired. */
 export function buildServer(deps: ProxyServerDeps): FastifyInstance {
   const { adapter, engine, telemetry, cfg } = deps;
@@ -323,7 +334,7 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
   // ---- Optional proxy auth gate (PROXY_API_KEY; empty = no gate) ----
   if (cfg.proxyApiKey !== "") {
     app.addHook("preHandler", async (request, reply) => {
-      if (request.headers.authorization !== `Bearer ${cfg.proxyApiKey}`) {
+      if (!bearerMatches(request.headers.authorization, cfg.proxyApiKey)) {
         reply
           .code(401)
           .send(
@@ -361,18 +372,31 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
 
     if (!parsed.stream) {
       const events: SubCallEvent[] = [];
-      const result = await subCallScope.run({ events }, () => engine.run(params));
-      if (result.degraded) reply.header("x-context-hierarchy-degraded", "true");
-      const usage = syntheticUsage(events, result.usage, params, cfg);
-      reply.send(
-        completionBody(
-          `chatcmpl-${randomUUID()}`,
-          Math.floor(Date.now() / 1000),
-          cfg.upstreamModel,
-          result,
-          usage,
-        ),
-      );
+      // A client that disconnects mid-request aborts the engine call the same
+      // way the stream path does (guarded: only before the reply finished).
+      const abort = new AbortController();
+      const onClose = (): void => {
+        if (!reply.sent) abort.abort();
+      };
+      request.raw.once("close", onClose);
+      try {
+        const result = await subCallScope.run({ events }, () =>
+          engine.run({ ...params, signal: abort.signal }),
+        );
+        if (result.degraded) reply.header("x-context-hierarchy-degraded", "true");
+        const usage = syntheticUsage(events, result.usage, params, cfg);
+        reply.send(
+          completionBody(
+            `chatcmpl-${randomUUID()}`,
+            Math.floor(Date.now() / 1000),
+            cfg.upstreamModel,
+            result,
+            usage,
+          ),
+        );
+      } finally {
+        request.raw.removeListener("close", onClose);
+      }
       return reply;
     }
 
@@ -395,6 +419,16 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
     reply.header("connection", "keep-alive");
     reply.send(sse);
 
+    // A disconnected streaming client aborts the whole fleet: `close` on the
+    // raw socket feeds an AbortController wired into engine.stream, so the
+    // engine's in-flight upstream calls are cancelled instead of running on
+    // for a client that is no longer there. Guarded: once the response is
+    // finished (normal end), the close is the expected one — no abort.
+    const fleetAbort = new AbortController();
+    request.raw.once("close", () => {
+      if (!reply.sent || !sse.readableEnded) fleetAbort.abort();
+    });
+
     const events: SubCallEvent[] = [];
     void (async () => {
       const push = (payload: unknown) => sse.push(sseLine(payload));
@@ -403,7 +437,7 @@ export function buildServer(deps: ProxyServerDeps): FastifyInstance {
         let finishReason: string | undefined;
         let finishUsage: Usage | undefined;
         await subCallScope.run({ events }, async () => {
-          for await (const event of engine.stream(params)) {
+          for await (const event of engine.stream({ ...params, signal: fleetAbort.signal })) {
             if (event.type === "error") throw new Error(event.message);
             if (event.type === "delta") {
               push(chunk([deltaChoice(event)]));

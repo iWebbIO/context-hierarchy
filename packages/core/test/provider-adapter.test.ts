@@ -470,6 +470,87 @@ describe("ProviderAdapter retry policy", () => {
   });
 });
 
+// ─── external abort (the client-cancellation seam) ──────────────────────────
+
+describe("ProviderAdapter external abort", () => {
+  it("chat: a hanging fetch rejects promptly when the caller's signal fires (no retry)", async () => {
+    const { adapter, calls } = adapterFor([
+      { kind: "hang" },
+      { kind: "response", response: jsonResponse(happyChatResponse) }, // must NOT be used
+    ]);
+    const controller = new AbortController();
+    const pending = adapter.chat({ ...params, signal: controller.signal });
+    const timer = setTimeout(() => controller.abort(), 30);
+    let caught: unknown;
+    try {
+      await pending;
+    } catch (e) {
+      caught = e;
+    } finally {
+      clearTimeout(timer);
+    }
+    expect((caught as Error).name).toBe("AbortError");
+    expect(calls.length).toBe(1); // an externally aborted call is never retried
+  });
+
+  it("stream: a hanging body read ends as an AbortError when the signal fires", async () => {
+    // A stream whose body never yields a line: only the abort unblocks it.
+    const hangingBody = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}), // never fulfills
+    });
+    const { adapter } = adapterFor([
+      { kind: "response", response: new Response(hangingBody, { status: 200 }) },
+    ]);
+    const controller = new AbortController();
+    const events: StreamEvent[] = [];
+    const timer = setTimeout(() => controller.abort(), 30);
+    let caught: unknown;
+    try {
+      for await (const event of adapter.stream({ ...params, signal: controller.signal })) {
+        events.push(event);
+      }
+    } catch (e) {
+      caught = e;
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(events).toEqual([]); // nothing was delivered
+    expect((caught as Error).name).toBe("AbortError"); // surfaced as a cancellation, never a clean end
+  });
+
+  it("stream: an abort AFTER events were yielded surfaces the abort (no duplicate)", async () => {
+    // One chunk is available, the rest hangs; the abort fires after the first
+    // event reached the consumer. The error surfaces (a retry would duplicate).
+    const encoder = new TextEncoder();
+    let pulled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!pulled) {
+          pulled = true;
+          controller.enqueue(encoder.encode(sse({ choices: [{ delta: { content: "partial" } }] })));
+          return;
+        }
+        // then hang forever
+      },
+    });
+    const { adapter } = adapterFor([{ kind: "response", response: new Response(body, { status: 200 }) }]);
+    const abort = new AbortController();
+    const gen = adapter.stream({ ...params, signal: abort.signal });
+    const first = await gen.next();
+    expect(first.value).toStrictEqual({ type: "delta", content: "partial" });
+    const timer = setTimeout(() => abort.abort(), 30);
+    let caught: unknown;
+    try {
+      await gen.next();
+    } catch (e) {
+      caught = e;
+    } finally {
+      clearTimeout(timer);
+    }
+    expect((caught as Error).name).toBe("AbortError");
+  });
+});
+
 // ─── models ─────────────────────────────────────────────────────────────────
 
 describe("ProviderAdapter.models", () => {

@@ -221,15 +221,25 @@ export class ProviderAdapter {
     return body;
   }
 
-  /**
-   * One HTTP attempt: auth header, JSON body, abort-on-timeout. The timeout
-   * covers time-to-response-headers per attempt — stream bodies may
-   * legitimately outlive it, and chat bodies are read immediately after.
-   * Non-OK responses throw UpstreamError with a best-effort parsed message.
-   */
-  private async send(path: string, method: "GET" | "POST", body?: unknown): Promise<Response> {
+/**
+ * One HTTP attempt: auth header, JSON body, abort-on-timeout. The timeout
+ * covers time-to-response-headers per attempt — stream bodies may
+ * legitimately outlive it, and chat bodies are read immediately after.
+ * A caller-supplied `signal` is bridged onto the same abort controller, so
+ * an external cancellation aborts the in-flight fetch (and, via the reader
+ * listener in stream(), the body read too). Non-OK responses throw
+ * UpstreamError with a best-effort parsed message.
+ */
+  private async send(
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const onExternalAbort = (): void => controller.abort();
+    signal?.addEventListener("abort", onExternalAbort);
     try {
       const headers: Record<string, string> = { authorization: `Bearer ${this.apiKey}` };
       if (body !== undefined) headers["content-type"] = "application/json";
@@ -243,11 +253,14 @@ export class ProviderAdapter {
       return res;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onExternalAbort);
     }
   }
 
-  /** 5xx and network/timeout failures are retryable; 4xx never is. */
-  private isRetryable(e: unknown): boolean {
+  /** 5xx and network/timeout failures are retryable; 4xx never is — and an
+   * externally-aborted call is never retried (the caller cancelled it). */
+  private isRetryable(e: unknown, signal?: AbortSignal): boolean {
+    if (signal !== undefined && signal.aborted) return false;
     if (e instanceof UpstreamError) return e.status !== undefined && e.status >= 500;
     return isTimeoutError(e) || e instanceof TypeError;
   }
@@ -256,10 +269,10 @@ export class ProviderAdapter {
   async chat(params: ChatParams): Promise<ChatResult> {
     for (let attempt = 0; ; attempt++) {
       try {
-        const res = await this.send("chat/completions", "POST", this.bodyFor(params, false));
+        const res = await this.send("chat/completions", "POST", this.bodyFor(params, false), params.signal);
         return mapChatResult(await res.json());
       } catch (e) {
-        if (attempt >= MAX_RETRIES || !this.isRetryable(e)) throw e;
+        if (attempt >= MAX_RETRIES || !this.isRetryable(e, params.signal)) throw e;
       }
     }
   }
@@ -268,25 +281,27 @@ export class ProviderAdapter {
    * Streaming chat: async generator of StreamEvents. Failures are retried
    * only while nothing has been yielded yet — once an event reached the
    * consumer, a retry would duplicate output, so the error surfaces instead.
+   * An external `params.signal` abort mid-stream cancels the body reader and
+   * surfaces as an AbortError (never retried).
    */
   async *stream(params: ChatParams): AsyncGenerator<StreamEvent> {
     for (let attempt = 0; ; attempt++) {
       let res: Response;
       try {
-        res = await this.send("chat/completions", "POST", this.bodyFor(params, true));
+        res = await this.send("chat/completions", "POST", this.bodyFor(params, true), params.signal);
       } catch (e) {
-        if (attempt >= MAX_RETRIES || !this.isRetryable(e)) throw e;
+        if (attempt >= MAX_RETRIES || !this.isRetryable(e, params.signal)) throw e;
         continue;
       }
       let yieldedAny = false;
       try {
-        for await (const event of this.readSse(res)) {
+        for await (const event of this.readSse(res, params.signal)) {
           yieldedAny = true;
           yield event;
         }
         return;
       } catch (e) {
-        if (!yieldedAny && attempt < MAX_RETRIES && this.isRetryable(e)) continue;
+        if (!yieldedAny && attempt < MAX_RETRIES && this.isRetryable(e, params.signal)) continue;
         throw e;
       }
     }
@@ -302,10 +317,10 @@ export class ProviderAdapter {
    * Map an SSE response body to StreamEvents. The finish reason is buffered
    * until [DONE] or stream end so a later usage chunk can attach to it.
    */
-  private async *readSse(res: Response): AsyncGenerator<StreamEvent> {
+  private async *readSse(res: Response, signal?: AbortSignal): AsyncGenerator<StreamEvent> {
     let pendingFinishReason: string | undefined;
     let pendingUsage: Usage | undefined;
-    for await (const rawLine of this.readLines(res)) {
+    for await (const rawLine of this.readLines(res, signal)) {
       const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       if (line === "" || line.startsWith(":")) continue; // separator or comment (keep-alive)
       if (!line.startsWith("data:")) continue; // other SSE fields unused in this dialect
@@ -381,10 +396,21 @@ export class ProviderAdapter {
     }
   }
 
-  /** Yield complete lines from the SSE body (newline-split, buffered). */
-  private async *readLines(res: Response): AsyncGenerator<string> {
+  /**
+   * Yield complete lines from the SSE body (newline-split, buffered). When an
+   * external `signal` fires mid-body the reader is CANCELLED (unblocking any
+   * pending read) and the iteration ends with an AbortError, so a cancelled
+   * stream surfaces as a cancellation — never as a clean stream end.
+   */
+  private async *readLines(res: Response, signal?: AbortSignal): AsyncGenerator<string> {
     if (!res.body) throw new Error("stream response has no body");
     const reader = res.body.getReader();
+    let externallyAborted = false;
+    const onAbort = (): void => {
+      externallyAborted = true;
+      void reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort);
     const decoder = new TextDecoder();
     let buffer = "";
     try {
@@ -399,9 +425,15 @@ export class ProviderAdapter {
           newline = buffer.indexOf("\n");
         }
       }
+      if (externallyAborted) {
+        const abort = new Error("This operation was aborted");
+        abort.name = "AbortError";
+        throw abort;
+      }
       buffer += decoder.decode(); // flush the decoder
       if (buffer.length > 0) yield buffer;
     } finally {
+      signal?.removeEventListener("abort", onAbort);
       void reader.cancel().catch(() => {});
     }
   }

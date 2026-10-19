@@ -24,6 +24,17 @@
 //   region) → synthesizer ([system] + [wrapped digests] + [original last
 //   user message]) → distillate put (bounded digests + final).
 //
+// The cache key covers every request parameter that changes the answer
+// (messages, cap, model, tools, temperature, max_tokens — see
+// DistillateCache.keyFor); the synthesizer inherits the user's tools,
+// tool_choice, temperature and max_tokens (one tool semantics across the
+// passthrough, fleet and degraded paths).
+//
+// Cancellation: run/stream accept an optional AbortSignal and thread it to
+// EVERY dispatch (direct, planner, workers, reducer, synthesizer, degraded),
+// where the adapter aborts the in-flight upstream call. A disconnected
+// streaming client therefore stops the fleet, not just the response.
+//
 // Degradation (global constraint 10, owned HERE): run() wraps the whole
 // fleet path in a try/catch — ANY failure falls back to strategy-fitting
 // the ORIGINAL request (a throwing strategy degrades further to a bare
@@ -123,6 +134,12 @@ export interface SubCallEvent {
    * cannot carry the HTTP header.
    */
   degraded?: boolean;
+  /**
+   * WHY the fleet degraded (the caught failure's message, bounded), carried
+   * on the degraded dispatch's event so a degradation is diagnosable, not
+   * just observable. Absent on every other event.
+   */
+  degradedReason?: string;
 }
 
 /** Constructor config (plan contract, task 5). */
@@ -289,22 +306,30 @@ function equalChunks(items: number[], k: number): number[][] {
 
 /**
  * Split recorded content into ~target-token delta pieces for cache replay.
- * Pieces are cut at whitespace runs so `pieces.join("") === content` exactly;
- * each piece flushes as soon as it reaches the target token count.
+ * Pieces are cut at whitespace runs so `pieces.join("") === content` exactly.
+ * Each part is token-counted ONCE and the counts accumulated — the target is
+ * soft (a piece that overshoots by the length of one part is fine), so no
+ * growing-buffer re-encode (the O(n²) this replaces).
  */
 function chunkByTokens(content: string, target: number): string[] {
   if (content.length === 0) return [];
   const parts = content.split(/(\s+)/); // words and whitespace runs, all preserved
   const pieces: string[] = [];
-  let current = "";
-  for (const part of parts) {
-    current += part;
-    if (countTokens(current) >= target) {
-      pieces.push(current);
-      current = "";
+  let current: string[] = [];
+  let currentTokens = 0;
+  const flush = (): void => {
+    if (current.length > 0) {
+      pieces.push(current.join(""));
+      current = [];
+      currentTokens = 0;
     }
+  };
+  for (const part of parts) {
+    current.push(part);
+    currentTokens += countTokens(part);
+    if (currentTokens >= target) flush();
   }
-  if (current.length > 0) pieces.push(current);
+  flush();
   return pieces;
 }
 
@@ -383,7 +408,7 @@ export class FleetEngine {
   private async dispatch(
     params: ChatParams,
     call: SubCallEvent["call"],
-    degraded = false,
+    degraded: boolean | { reason?: string } = false,
   ): Promise<ChatResult> {
     const started = Date.now();
     const fitted = await this.fitForCap(params, call);
@@ -397,7 +422,7 @@ export class FleetEngine {
   private async *dispatchStream(
     params: ChatParams,
     call: SubCallEvent["call"],
-    degraded = false,
+    degraded: boolean | { reason?: string } = false,
   ): AsyncGenerator<StreamEvent> {
     const started = Date.now();
     const fitted = await this.fitForCap(params, call);
@@ -427,7 +452,7 @@ export class FleetEngine {
     latencyMs: number,
     cacheHit: boolean,
     usage?: Usage,
-    degraded = false,
+    degraded: boolean | { reason?: string } = false,
   ): void {
     if (!this.onSubCall) return;
     const event: SubCallEvent = { call, estimatedTokens, latencyMs, cacheHit };
@@ -435,7 +460,12 @@ export class FleetEngine {
       event.promptTokens = usage.promptTokens;
       event.completionTokens = usage.completionTokens;
     }
-    if (degraded) event.degraded = true;
+    if (degraded !== false) {
+      event.degraded = true;
+      if (typeof degraded === "object" && degraded.reason !== undefined) {
+        event.degradedReason = degraded.reason;
+      }
+    }
     this.onSubCall(event);
   }
 
@@ -466,6 +496,7 @@ export class FleetEngine {
     params: ChatParams,
     toc: string,
     decomp: Decomposition,
+    signal?: AbortSignal,
   ): Promise<WorkerSlice[] | undefined> {
     if (this.plannerDisabled) return undefined; // benchmark arm: straight to map-reduce
     // ONE user message (TOC + the original ask + instruction): some strict
@@ -479,7 +510,12 @@ export class FleetEngine {
     const plannerMessages: ChatMessage[] = [{ role: "user", content: parts.join("\n\n---\n\n") }];
     try {
       const result = await this.dispatch(
-        { model: this.model, messages: plannerMessages, max_tokens: PLANNER_MAX_TOKENS },
+        {
+          model: this.model,
+          messages: plannerMessages,
+          max_tokens: PLANNER_MAX_TOKENS,
+          ...(signal !== undefined ? { signal } : {}),
+        },
         "planner",
       );
       return parseAssignments(result.content, params.messages.length, decomp.middleIdx);
@@ -527,7 +563,11 @@ export class FleetEngine {
    * Workers all settle before the first failure is rethrown, so a
    * degradation path never races lingering calls.
    */
-  private async runWorkers(slices: WorkerSlice[], messages: ChatMessage[]): Promise<string[]> {
+  private async runWorkers(
+    slices: WorkerSlice[],
+    messages: ChatMessage[],
+    signal?: AbortSignal,
+  ): Promise<string[]> {
     const digests: string[] = new Array<string>(slices.length);
     const laneCount = Math.max(1, Math.min(this.maxWorkers, slices.length));
     let nextSlice = 0;
@@ -541,7 +581,12 @@ export class FleetEngine {
           { role: "user", content: WORKER_INSTRUCTION },
         ];
         const result = await this.dispatch(
-          { model: this.model, messages: workerMessages, max_tokens: slice.budgetTokens },
+          {
+            model: this.model,
+            messages: workerMessages,
+            max_tokens: slice.budgetTokens,
+            ...(signal !== undefined ? { signal } : {}),
+          },
           "worker",
         );
         digests[k] = result.content;
@@ -566,8 +611,10 @@ export class FleetEngine {
   /**
    * The synthesizer prompt: [all system messages] + [one message joining the
    * wrapped digests, in order] + [the ORIGINAL last user message, verbatim,
-   * last]. No max_tokens — the model default for run(); the stream path
-   * streams it.
+   * last]. The request's `tools`, `tool_choice`, `temperature` and
+   * `max_tokens` are forwarded verbatim — the synthesizer answers the USER's
+   * request, so it runs with the user's tool and sampling semantics, exactly
+   * like the passthrough and degraded paths already did.
    */
   private synthesizerParams(params: ChatParams, digests: string[], decomp: Decomposition): ChatParams {
     const messages: ChatMessage[] = decomp.systemIdx.map((i) => params.messages[i]);
@@ -575,7 +622,12 @@ export class FleetEngine {
       messages.push({ role: "user", content: this.joinDigests(digests) });
     }
     if (decomp.lastUserIdx >= 0) messages.push(params.messages[decomp.lastUserIdx]);
-    return { model: this.model, messages };
+    const out: ChatParams = { model: this.model, messages };
+    if (params.tools !== undefined) out.tools = params.tools;
+    if (params.tool_choice !== undefined) out.tool_choice = params.tool_choice;
+    if (params.temperature !== undefined) out.temperature = params.temperature;
+    if (params.max_tokens !== undefined) out.max_tokens = params.max_tokens;
+    return out;
   }
 
   /**
@@ -637,7 +689,7 @@ export class FleetEngine {
    * One reducer call per group (≤ maxWorkers in flight), each a capped
    * dispatch like any other. Mirrors runWorkers' lane structure.
    */
-  private async reduceGroups(groups: string[][]): Promise<string[]> {
+  private async reduceGroups(groups: string[][], signal?: AbortSignal): Promise<string[]> {
     const digests: string[] = new Array<string>(groups.length);
     const laneCount = Math.max(1, Math.min(this.maxWorkers, groups.length));
     let nextGroup = 0;
@@ -652,6 +704,7 @@ export class FleetEngine {
               { role: "user", content: `${REDUCE_INSTRUCTION}\n\n${this.joinDigests(groups[k])}` },
             ],
             max_tokens: REDUCE_MAX_TOKENS,
+            ...(signal !== undefined ? { signal } : {}),
           },
           "reducer",
         );
@@ -667,7 +720,7 @@ export class FleetEngine {
   }
 
   /** TOC → planner (or fallback) → workers. Shared by run() and stream(). */
-  private async planAndCompress(params: ChatParams): Promise<FleetPlan> {
+  private async planAndCompress(params: ChatParams, signal?: AbortSignal): Promise<FleetPlan> {
     const decomp = decompose(params.messages);
     if (decomp.middleIdx.length === 0) {
       // Nothing to compress — the fleet degenerates to the synthesizer call
@@ -675,9 +728,9 @@ export class FleetEngine {
       return { digests: [], decomp };
     }
     const toc = this.buildToc(params.messages);
-    const planned = await this.planSlices(params, toc, decomp);
+    const planned = await this.planSlices(params, toc, decomp, signal);
     const slices = planned ?? this.mapReduceSlices(decomp.middleIdx, params.messages);
-    const digests = await this.runWorkers(slices, params.messages);
+    const digests = await this.runWorkers(slices, params.messages, signal);
     return { digests, decomp };
   }
 
@@ -710,9 +763,13 @@ export class FleetEngine {
   }
 
   /** The degraded path: one truncation-fit direct call, marked degraded. */
-  private async degradedRun(params: ChatParams): Promise<ChatResult> {
+  private async degradedRun(params: ChatParams, reason?: string): Promise<ChatResult> {
     const messages = await this.fitForDegradation(params);
-    const result = await this.dispatch({ ...params, messages }, "direct", true);
+    const result = await this.dispatch(
+      { ...params, messages },
+      "direct",
+      reason === undefined ? true : { reason },
+    );
     return { ...result, degraded: true };
   }
 
@@ -720,13 +777,26 @@ export class FleetEngine {
   // Public API.
   // ------------------------------------------------------------------
 
-  /** Non-streaming call: passthrough when it fits, fleet + cache when not. */
-  async run(params: ChatParams): Promise<ChatResult> {
-    const estimated = this.accountant.estimate(params.messages, this.model);
+  /** Non-streaming call: passthrough when it fits, fleet + cache when not.
+   * `signal` (optional) is threaded to every dispatch, so an aborted caller
+   * cancels the fleet's in-flight upstream calls instead of orphaning them. */
+  async run(params: ChatParams & { signal?: AbortSignal }): Promise<ChatResult> {
+    const { signal, ...base } = params;
+    const request: ChatParams = base;
+    const estimated = this.accountant.estimate(request.messages, this.model);
     if (estimated <= this.capTokens) {
-      return this.dispatch(params, "direct");
+      return this.dispatch({ ...request, ...(signal !== undefined ? { signal } : {}) }, "direct");
     }
-    const key = this.cache.keyFor(params.messages, this.capTokens, this.model);
+    const key = this.cache.keyFor(
+      request.messages,
+      this.capTokens,
+      this.model,
+      {
+        tools: request.tools,
+        temperature: request.temperature,
+        max_tokens: request.max_tokens,
+      },
+    );
     const lookupStarted = Date.now();
     const cached = await this.cache.get(key);
     if (cached !== null && cached.final !== null) {
@@ -740,29 +810,47 @@ export class FleetEngine {
       return replay;
     }
     try {
-      const { digests, decomp } = await this.planAndCompress(params);
-      const bounded = await this.boundDigests(digests, params, decomp);
-      const synth = await this.dispatch(this.synthesizerParams(params, bounded, decomp), "synthesizer");
+      const { digests, decomp } = await this.planAndCompress(request, signal);
+      const bounded = await this.boundDigests(digests, request, decomp);
+      const synth = await this.dispatch(
+        {
+          ...this.synthesizerParams(request, bounded, decomp),
+          ...(signal !== undefined ? { signal } : {}),
+        },
+        "synthesizer",
+      );
       const final: DistillateFinal = { content: synth.content, finishReason: synth.finishReason };
       if (synth.usage !== undefined) final.usage = synth.usage;
       await this.cache.put(key, { digests: bounded, final });
       return synth;
-    } catch {
+    } catch (e) {
       // ANY fleet-path failure → degraded single direct call. Upstream
       // errors from that final call propagate honestly (as does an
       // InternalCapViolation when even the truncation floor cannot fit).
-      return this.degradedRun(params);
+      // The caught reason rides on the degraded event (why, not just that).
+      return this.degradedRun(request, reasonOf(e));
     }
   }
 
   /** Streaming call: passthrough when it fits, fleet with a streaming synthesizer when not. */
-  async *stream(params: ChatParams): AsyncGenerator<StreamEvent> {
-    const estimated = this.accountant.estimate(params.messages, this.model);
+  async *stream(params: ChatParams & { signal?: AbortSignal }): AsyncGenerator<StreamEvent> {
+    const { signal, ...base } = params;
+    const request: ChatParams = base;
+    const estimated = this.accountant.estimate(request.messages, this.model);
     if (estimated <= this.capTokens) {
-      yield* this.dispatchStream(params, "direct");
+      yield* this.dispatchStream({ ...request, ...(signal !== undefined ? { signal } : {}) }, "direct");
       return;
     }
-    const key = this.cache.keyFor(params.messages, this.capTokens, this.model);
+    const key = this.cache.keyFor(
+      request.messages,
+      this.capTokens,
+      this.model,
+      {
+        tools: request.tools,
+        temperature: request.temperature,
+        max_tokens: request.max_tokens,
+      },
+    );
     const lookupStarted = Date.now();
     const cached = await this.cache.get(key);
     if (cached !== null && cached.final !== null) {
@@ -780,13 +868,16 @@ export class FleetEngine {
     }
     let deliveredAny = false;
     try {
-      const { digests, decomp } = await this.planAndCompress(params);
-      const bounded = await this.boundDigests(digests, params, decomp);
-      const synthesizer = this.synthesizerParams(params, bounded, decomp);
+      const { digests, decomp } = await this.planAndCompress(request, signal);
+      const bounded = await this.boundDigests(digests, request, decomp);
+      const synthesizer = this.synthesizerParams(request, bounded, decomp);
       let content = "";
       let finishReason: string | undefined;
       let usage: Usage | undefined;
-      for await (const event of this.dispatchStream(synthesizer, "synthesizer")) {
+      for await (const event of this.dispatchStream(
+        { ...synthesizer, ...(signal !== undefined ? { signal } : {}) },
+        "synthesizer",
+      )) {
         deliveredAny = true;
         if (event.type === "delta" && event.content !== undefined) content += event.content;
         if (event.type === "finish") {
@@ -807,9 +898,18 @@ export class FleetEngine {
       // Nothing was yielded yet — degrade to one direct stream, marked: the
       // finish event carries `degraded: true` (synthesized if the underlying
       // stream ends without one) and the sub-call telemetry event does too.
-      const messages = await this.fitForDegradation(params);
+      const reason = reasonOf(e);
+      const messages = await this.fitForDegradation(request);
       let sawFinish = false;
-      for await (const event of this.dispatchStream({ ...params, messages }, "direct", true)) {
+      for await (const event of this.dispatchStream(
+        {
+          ...request,
+          messages,
+          ...(signal !== undefined ? { signal } : {}),
+        },
+        "direct",
+        reason === undefined ? true : { reason },
+      )) {
         if (event.type === "finish") {
           sawFinish = true;
           yield { ...event, degraded: true };
@@ -825,4 +925,10 @@ export class FleetEngine {
       }
     }
   }
+}
+
+/** The caught failure's message for the degraded event, bounded to ~200 chars. */
+function reasonOf(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 200);
 }

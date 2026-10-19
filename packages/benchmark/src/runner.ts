@@ -24,7 +24,7 @@ import type { SubCallEvent } from "@context-hierarchy/core";
 import { runArm } from "./arms.js";
 import type { ArmConfig, ArmName } from "./arms.js";
 import type { BenchmarkTask } from "./types.js";
-import { verifyTask } from "./verify.js";
+import { verifyTask, verifyTaskStrict } from "./verify.js";
 
 /** Upstream endpoint for a benchmark run. `fetch`/`timeoutMs` are the
  * injectable ProviderAdapter knobs (tests script the fetch; the live CLI
@@ -45,7 +45,13 @@ export interface RunResult {
   /** `null` = the uncapped reference arm (run once per task, no cap dimension). */
   capTokens: number | null;
   trial: number;
+  /** Quote-normalized correctness (the headline grade): matching surrounding
+   *  quote pairs are stripped before the verify rule runs. */
   correct: boolean;
+  /** RAW correctness (no normalization): the same verify rule over the exact
+   *  model output — `strictCorrect === false && correct === true` means the
+   *  point was only the quote wrapper. */
+  strictCorrect: boolean;
   /** The complete answer the verifier judged (truncated past 2000 chars,
    * after verification ran on the full content). */
   verifiedAnswer: string;
@@ -106,8 +112,8 @@ export function sanitizeTaskId(taskId: string): string {
 /**
  * The per-run state directory. Capped cells get
  * `<dataDir>/<taskId>/cap-<cap>/<arm>/trial-<n>`; the uncapped reference —
- * which runs once per task, not per cap or trial — gets
- * `<dataDir>/<taskId>/uncapped`.
+ * which runs once per task per TRIAL (not per cap) — gets
+ * `<dataDir>/<taskId>/uncapped/trial-<n>`.
  */
 export function runDirFor(
   dataDir: string,
@@ -117,7 +123,7 @@ export function runDirFor(
   trial: number,
 ): string {
   return arm === "uncapped"
-    ? join(dataDir, sanitizeTaskId(taskId), "uncapped")
+    ? join(dataDir, sanitizeTaskId(taskId), "uncapped", `trial-${trial}`)
     : join(dataDir, sanitizeTaskId(taskId), `cap-${capTokens}`, arm, `trial-${trial}`);
 }
 
@@ -187,6 +193,7 @@ async function executeRun(
     capTokens,
     trial,
     correct: false,
+    strictCorrect: false,
     verifiedAnswer: "",
     modelContent: "",
     subCalls: [], // on a failed run, per-call telemetry dies with the run (documented)
@@ -197,6 +204,7 @@ async function executeRun(
   try {
     const outcome = await withWallClock(runArm(arm, task.messages, cfg), timeoutMs);
     result.correct = verifyTask(outcome.content, task.verify);
+    result.strictCorrect = verifyTaskStrict(outcome.content, task.verify);
     result.verifiedAnswer = verifiedAnswerOf(outcome.content);
     result.modelContent = excerpt(outcome.content);
     result.subCalls = outcome.subCalls;
@@ -210,9 +218,9 @@ async function executeRun(
 }
 
 /**
- * Run the grid: every (task, cap, arm, trial) cell plus one uncapped reference
- * per task when the `uncapped` arm is selected. Results come back in grid
- * order (task → cap → arm → trial, uncapped last per task).
+ * Run the grid: every (task, cap, arm, trial) cell plus the uncapped reference
+ * per task per trial when the `uncapped` arm is selected. Results come back in
+ * grid order (task → cap → arm → trial, uncapped last per task).
  */
 export async function runGrid(params: RunGridParams): Promise<RunResult[]> {
   const trials = params.trials ?? 1;
@@ -245,8 +253,14 @@ export async function runGrid(params: RunGridParams): Promise<RunResult[]> {
         }
       }
     }
-    // The uncapped reference is cap-independent: once per task, not per cap.
-    if (withUncapped) jobs.push({ task, arm: "uncapped", capTokens: null, trial: 1 });
+    // The uncapped reference is cap-independent — but it honors --trials:
+    // `trials` runs per task (once per task per trial), so its variance is
+    // observable like any other arm's.
+    if (withUncapped) {
+      for (let trial = 1; trial <= trials; trial++) {
+        jobs.push({ task, arm: "uncapped", capTokens: null, trial });
+      }
+    }
   }
   if (jobs.length === 0) return [];
 

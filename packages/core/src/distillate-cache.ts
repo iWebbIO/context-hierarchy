@@ -54,7 +54,11 @@ export class DistillateCache {
 
   /**
    * Content-addressed key: sha256 hex of `JSON.stringify({ messages,
-   * capTokens, model })`.
+   * capTokens, model, tools, temperature, max_tokens })` — every request
+   * parameter that changes the answer. `tools`, `temperature` and
+   * `max_tokens` are part of the key (as present/absent, not defaulted): a
+   * different toolset or sampling config is a different request even over
+   * identical messages. `model` names the tokenizer the estimate assumed.
    *
    * Documented limitation: the key covers the EXACT request — retries of the
    * same request replay the same distillate, and so does any byte-identical
@@ -63,9 +67,24 @@ export class DistillateCache {
    * Incremental reuse comes from the strategies' own content addressing
    * (the hierarchy spill store), not from this cache.
    */
-  keyFor(messages: ChatMessage[], capTokens: number, model: string): string {
+  keyFor(
+    messages: ChatMessage[],
+    capTokens: number,
+    model: string,
+    extras?: { tools?: unknown[]; temperature?: number; max_tokens?: number },
+  ): string {
     return createHash("sha256")
-      .update(JSON.stringify({ messages, capTokens, model }), "utf8")
+      .update(
+        JSON.stringify({
+          messages,
+          capTokens,
+          model,
+          tools: extras?.tools,
+          temperature: extras?.temperature,
+          max_tokens: extras?.max_tokens,
+        }),
+        "utf8",
+      )
       .digest("hex");
   }
 

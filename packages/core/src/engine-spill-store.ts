@@ -32,8 +32,9 @@ import { SpillRestoreError } from "./strategies/hierarchy.js";
 import type { ChatMessage, ToolCall } from "./types.js";
 import type { SpilledMessage } from "./strategy.js";
 
-/** Spill pointer shape: 64 lowercase hex chars + `.json` (same as hierarchy). */
-const POINTER_RE = /^[0-9a-f]{64}\.json$/;
+/** Spill pointer shape: 64 lowercase hex chars + `.json` (same as hierarchy).
+ *  Exported as THE one pointer-shape source — hierarchy imports it. */
+export const POINTER_RE = /^[0-9a-f]{64}\.json$/;
 
 /** One recorded removal: the seam's SpilledMessage plus this record's pointer. */
 export interface EngineSpillEntry extends SpilledMessage {
