@@ -1,5 +1,5 @@
 // Minimal hand-written OpenAI chat-completions wire types (no SDK dependency).
-// Request-side only in v1; response/stream shapes land with the ProviderAdapter.
+// Request shapes, plus the result/stream shapes the ProviderAdapter maps to.
 
 /** Chat role on the OpenAI wire format. */
 export type Role = "system" | "user" | "assistant" | "tool";
@@ -33,3 +33,34 @@ export interface ChatParams {
   tools?: unknown[];
   tool_choice?: unknown;
 }
+
+/** Token usage reported by the upstream for one call. */
+export interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/** Result of a non-streaming chat completion. */
+export interface ChatResult {
+  content: string;
+  toolCalls?: ToolCall[];
+  finishReason: string;
+  usage?: Usage;
+}
+
+/**
+ * One `choices[0].delta.tool_calls[]` fragment, keyed by its wire `index`.
+ * Fragments of the same call share an index; the consumer assembles them.
+ */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  functionName?: string;
+  argumentsDelta?: string;
+}
+
+/** Events yielded by `ProviderAdapter.stream`, in SSE arrival order. */
+export type StreamEvent =
+  | { type: "delta"; content?: string; toolCallDeltas?: ToolCallDelta[] }
+  | { type: "finish"; finishReason: string; usage?: Usage }
+  | { type: "error"; message: string };
