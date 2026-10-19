@@ -13,3 +13,5 @@ export { TokenAccountant } from "./token-accountant.js";
 export type { TokenAccountantOptions } from "./token-accountant.js";
 export { ProviderAdapter, UpstreamError } from "./provider-adapter.js";
 export type { AdapterConfig } from "./provider-adapter.js";
+export type { ContextStrategy, FitResult, SpilledMessage, StrategyCtx } from "./strategy.js";
+export { TruncationStrategy } from "./strategies/truncation.js";
