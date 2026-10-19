@@ -1,0 +1,5 @@
+{
+  "name": "@context-hierarchy/core",
+  "type": "module",
+  "main": "dist/index.js"
+}

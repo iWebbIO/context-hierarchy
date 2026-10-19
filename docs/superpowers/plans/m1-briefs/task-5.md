@@ -1,0 +1,27 @@
+# Task 5 — FleetEngine + DistillateCache
+
+## Context
+
+Branch `feat/m1-core-proxy`, tree clean. Everything below you is landed: accountant, adapter, strategies. You now build the heart: the engine that decides passthrough vs fleet, orchestrates planner → workers → synthesizer under the cap, caches distillates, and owns degradation.
+
+## Requirements
+
+R1. `DistillateCache` in `packages/core/src/distillate-cache.ts` per the plan contract: `keyFor(messages, capTokens, model)` = sha256 hex of `JSON.stringify({ messages, capTokens, model })`; entries persisted as content-addressed JSON files under `${dataDir}/cache/` (`Distillate` = `{ digests: string[]; final: { content: string; finishReason: string; usage?: { promptTokens: number; completionTokens: number } } | null }`); `get`/`put` async, missing key → `null`; files written once, never rewritten (append-only). Documented limitation (code comment): the key covers the exact request — retries and identical requests replay; incremental cross-turn reuse comes from the strategies' own content addressing.
+
+R2. `FleetEngine` in `packages/core/src/fleet-engine.ts` per the plan contract. Internal `dispatch(params)` funnel: EVERY outgoing adapter call goes through it — estimate with the accountant first; if over `capTokens` → strategy-fit the params' messages (never dispatch over cap — a violation is an engine bug, throw `InternalCapViolation`); emit `onSubCall` after each call with `{ call, estimatedTokens, latencyMs, cacheHit, promptTokens?, completionTokens? }` (usage mapped from the result when present).
+
+- **`run(params)` (non-stream):**
+  - Estimate the full request. Fits → one `direct` dispatch, return its `ChatResult`.
+  - Over → check cache: hit with `final` → return a `ChatResult` replayed from `final` (a `direct`-shaped event marked `cacheHit: true`).
+  - Miss → **TOC** (deterministic, no LLM): per-message line `#<index> <role> ~<estimate>t: <first 60 chars of content, single line>`.
+  - **Planner** (`planner` dispatch): prompt = TOC + the original last user message + instruction to output ONLY a JSON array of assignments `[{"start": number, "end": number, "budgetTokens": number}]` covering the middle region (between the system block and the tail), where start/end are message indices and budgetTokens ≤ 1000 per worker. `max_tokens: 500`. Parse the JSON (tolerate a leading "```json" fence). On ANY planner failure (error, unparseable, empty) → **fixed map-reduce fallback**: slice the middle region into equal chunks sized so each fits the cap minus prompt overhead.
+  - **Workers** (`worker` dispatches, ≤ `maxWorkers` (default 3) in flight concurrently): each gets its assigned verbatim slice messages + one instruction line ("Compress your assigned slice into a dense digest. Preserve verbatim: code, quotes, paths, ids, numbers, decisions. Plain text only.") with `max_tokens` = the assigned budget (default 1000). A slice that overflows the cap gets strategy-fit before dispatch. Collect digests in region order.
+  - **Synthesizer** (`synthesizer` dispatch): prompt = [all system messages] + [digests joined, in order, each wrapped `[digest <n>]`…`]`] + [the ORIGINAL last user message, verbatim, last]. Non-stream: one `chat` call; stream: `stream` call. `max_tokens`: unset (model default) for run(), the stream drives stream().
+  - After completion: `put` the distillate (digests + final).
+  - **Degradation** (owned here): wrap the whole fleet path in a try/catch — ANY failure → log to `onSubCall` is not required, but emit `console`-free structured handling: strategy-fit the ORIGINAL full request (truncation semantics via the configured strategy; if the strategy itself throws, fall back to a bare `TruncationStrategy`) and make one `direct` dispatch; return the `ChatResult` with `degraded: true` added. The engine never throws for fleet-internal reasons; upstream errors from the degraded direct call propagate honestly (typed `UpstreamError`).
+
+- **`stream(params)` (streaming):** fits → passthrough: `yield*` the adapter's `stream`. Over → same pipeline, but the SYNTHESIZER streams: yield its delta/finish events; after it finishes, `put` the distillate with `final` assembled from the streamed content + finish reason. Cache hit with `final` → replay the recorded content as delta events in ~20-token chunks, then a `finish` event.
+
+R3. Tests in `packages/core/test/` with scripted fakes (recording adapter + real accountant + temp dataDir; the strategy = truncation for determinism, or a fake strategy): (a) passthrough — small request, exactly 1 direct call; (b) **the cap invariant test** — oversized request, recording fake: EVERY dispatched call's messages estimate ≤ cap, and the final response is valid; (c) planner garbage → map-reduce fallback still completes; (d) cache — identical oversized request twice: second run makes ZERO planner/worker/synthesizer dispatches (only a cache-hit marker or none at all), same content; (e) streaming — oversized `stream()` yields delta events then finish; (f) worker slice overflow → slice strategy-fitted, never a nested fleet (assert no recursive engine behavior); (g) degradation — adapter throws on planner → engine still returns a result with `degraded: true` via one direct call; (h) `onSubCall` events emitted with correct `call` labels.
+
+R4. Export from `src/index.ts`. `npm test`, `npm run typecheck` green. No new deps. Commit `task-5: fleet engine + distillate cache`, explicit adds.

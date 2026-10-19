@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.ctxh/
+.superpowers/
+.zcode/
+coverage/
+*.log

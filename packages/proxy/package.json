@@ -1,0 +1,7 @@
+{
+  "name": "@context-hierarchy/proxy",
+  "type": "module",
+  "dependencies": {
+    "@context-hierarchy/core": "*"
+  }
+}
