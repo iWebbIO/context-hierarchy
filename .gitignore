@@ -8,3 +8,4 @@ coverage/
 *.log
 benchmark-results/
 benchmark-results-uncapped/
+benchmark-data/
