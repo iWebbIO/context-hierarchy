@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "generatedAt": "2026-10-19T08:05:49.047Z",
+    "model": "glm-5.3-max",
+    "upstreamHost": "apix.moreweb.space",
+    "arms": [
+      "uncapped"
+    ],
+    "caps": [
+      2000,
+      4000,
+      6000,
+      8000
+    ],
+    "trials": 2,
+    "concurrency": 4,
+    "timeoutMs": 600000
+  },
+  "results": [
+    {
+      "taskId": "synth-needle-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "QX-1254",
+      "modelContent": "QX-1254",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 5534,
+          "latencyMs": 2301,
+          "cacheHit": false,
+          "promptTokens": 4842,
+          "completionTokens": 37
+        }
+      ],
+      "wallMs": 2301,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-needle-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "RK-2384",
+      "modelContent": "RK-2384",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 14543,
+          "latencyMs": 2262,
+          "cacheHit": false,
+          "promptTokens": 12707,
+          "completionTokens": 64
+        }
+      ],
+      "wallMs": 2262,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-needle-3",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "TL-5033",
+      "modelContent": "TL-5033",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 28423,
+          "latencyMs": 2282,
+          "cacheHit": false,
+          "promptTokens": 24718,
+          "completionTokens": 70
+        }
+      ],
+      "wallMs": 2283,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-multihop-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "MQ-8",
+      "modelContent": "MQ-8",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 5569,
+          "latencyMs": 2291,
+          "cacheHit": false,
+          "promptTokens": 4873,
+          "completionTokens": 73
+        }
+      ],
+      "wallMs": 2291,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-multihop-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "NM-1",
+      "modelContent": "NM-1",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 14555,
+          "latencyMs": 2461,
+          "cacheHit": false,
+          "promptTokens": 12720,
+          "completionTokens": 59
+        }
+      ],
+      "wallMs": 2461,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-multihop-3",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "FJ-4",
+      "modelContent": "FJ-4",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 28477,
+          "latencyMs": 2505,
+          "cacheHit": false,
+          "promptTokens": 24764,
+          "completionTokens": 94
+        }
+      ],
+      "wallMs": 2505,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-update-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "VR-35",
+      "modelContent": "VR-35",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 5556,
+          "latencyMs": 2399,
+          "cacheHit": false,
+          "promptTokens": 4861,
+          "completionTokens": 37
+        }
+      ],
+      "wallMs": 2399,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-update-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "TL-46",
+      "modelContent": "TL-46",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 14554,
+          "latencyMs": 2515,
+          "cacheHit": false,
+          "promptTokens": 12737,
+          "completionTokens": 102
+        }
+      ],
+      "wallMs": 2515,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-update-3",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "NM-20",
+      "modelContent": "NM-20",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 27124,
+          "latencyMs": 2954,
+          "cacheHit": false,
+          "promptTokens": 23728,
+          "completionTokens": 96
+        }
+      ],
+      "wallMs": 2954,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-count-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "13",
+      "modelContent": "13",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 6169,
+          "latencyMs": 4295,
+          "cacheHit": false,
+          "promptTokens": 5375,
+          "completionTokens": 459
+        }
+      ],
+      "wallMs": 4295,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-count-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "11",
+      "modelContent": "11",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 15205,
+          "latencyMs": 6686,
+          "cacheHit": false,
+          "promptTokens": 13251,
+          "completionTokens": 1040
+        }
+      ],
+      "wallMs": 6686,
+      "degraded": false
+    },
+    {
+      "taskId": "synth-count-3",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "12",
+      "modelContent": "12",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 27870,
+          "latencyMs": 7761,
+          "cacheHit": false,
+          "promptTokens": 24277,
+          "completionTokens": 1229
+        }
+      ],
+      "wallMs": 7761,
+      "degraded": false
+    },
+    {
+      "taskId": "code-needle-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "csv.ts#splitCsvLine",
+      "modelContent": "csv.ts#splitCsvLine",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3280,
+          "latencyMs": 695,
+          "cacheHit": false,
+          "promptTokens": 2860,
+          "completionTokens": 54
+        }
+      ],
+      "wallMs": 696,
+      "degraded": false
+    },
+    {
+      "taskId": "code-needle-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "**45000**\n\nThis is set in the `DEFAULTS` constant in `config-loader.ts`:\n\n```typescript\nconst DEFAULTS: ConfigOptions = {\n  retries: 4,\n  timeoutMs: 45000,\n  encoding: \"utf-8\",\n};\n```",
+      "modelContent": "**45000**\n\nThis is set in the `DEFAULTS` constant in `config-loader.ts`:\n\n```typescript\nconst DEFAULTS: ConfigOptions = {\n  retries: 4,\n  timeoutMs: 45000,\n  encoding: \"utf-8\",\n};\n```",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3279,
+          "latencyMs": 806,
+          "cacheHit": false,
+          "promptTokens": 2859,
+          "completionTokens": 122
+        }
+      ],
+      "wallMs": 806,
+      "degraded": false
+    },
+    {
+      "taskId": "code-execute-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": false,
+      "verifiedAnswer": "\"The Ortunda-7 Manifest\"",
+      "modelContent": "\"The Ortunda-7 Manifest\"",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3287,
+          "latencyMs": 1432,
+          "cacheHit": false,
+          "promptTokens": 2866,
+          "completionTokens": 206
+        }
+      ],
+      "wallMs": 1432,
+      "degraded": false
+    },
+    {
+      "taskId": "code-execute-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": false,
+      "verifiedAnswer": "\"1.5 MiB\"",
+      "modelContent": "\"1.5 MiB\"",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3278,
+          "latencyMs": 1281,
+          "cacheHit": false,
+          "promptTokens": 2859,
+          "completionTokens": 247
+        }
+      ],
+      "wallMs": 1281,
+      "degraded": false
+    },
+    {
+      "taskId": "code-bug-1",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "  return year % 4 === 0 && year % 100 !== 0;",
+      "modelContent": "return year % 4 === 0 && year % 100 !== 0;",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3287,
+          "latencyMs": 1876,
+          "cacheHit": false,
+          "promptTokens": 2866,
+          "completionTokens": 324
+        }
+      ],
+      "wallMs": 1876,
+      "degraded": false
+    },
+    {
+      "taskId": "code-bug-2",
+      "arm": "uncapped",
+      "capTokens": null,
+      "trial": 1,
+      "correct": true,
+      "verifiedAnswer": "```\n    return this.size >= this.capacity - 1;\n```",
+      "modelContent": "```\n    return this.size >= this.capacity - 1;\n```",
+      "subCalls": [
+        {
+          "call": "direct",
+          "estimatedTokens": 3296,
+          "latencyMs": 937,
+          "cacheHit": false,
+          "promptTokens": 2874,
+          "completionTokens": 80
+        }
+      ],
+      "wallMs": 937,
+      "degraded": false
+    }
+  ]
+}
